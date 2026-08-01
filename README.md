@@ -20,7 +20,6 @@ Pipeline MLOps para clasificar entradas de diario como **Productivo** o **Procra
 12. [Credenciales de prueba](#credenciales-de-prueba)
 13. [Troubleshooting](#troubleshooting)
 14. [División del equipo: qué falta / qué mejorar](#división-del-equipo-qué-falta--qué-mejorar)
-15. [Roadmap sugerido](#roadmap-sugerido)
 
 ---
 
@@ -454,15 +453,6 @@ El repo ya tiene un **esqueleto funcional end-to-end**. Abajo: estado actual y p
 - [ ] Mejorar UX del dashboard (filtros por fecha, export CSV)
 - [ ] Tests de contrato API (`/predict`, `/auth/*`)
 - [ ] Guía corta de demo en vivo (script de 3 minutos)
-
----
-
-## Roadmap sugerido
-
-1. **Semana 1:** dataset más grande + PyCaret estable + MLflow Registry → Production  
-2. **Semana 2:** DAG Airflow validado en grupo + API cargando modelo versionado  
-3. **Semana 3:** Streamlit pulido + Docker demo única (`docker compose up`)  
-4. **Demo final:** Accuracy/F1 reportados, gráfico histórico y flujo login → predicción
 
 ---
 
