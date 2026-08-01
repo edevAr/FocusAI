@@ -1,0 +1,46 @@
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.1
+    container_name: focusai-mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri /mlflow/mlruns
+      --default-artifact-root /mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./artifacts/mlruns:/mlflow/mlruns
+      - ./artifacts/mlflow-artifacts:/mlflow/artifacts
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: focusai-api
+    ports:
+      - "8000:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    depends_on:
+      - mlflow
+
+  frontend:
+    image: python:3.10-slim
+    container_name: focusai-frontend
+    working_dir: /app
+    command: >
+      bash -c "pip install --no-cache-dir streamlit plotly requests pandas &&
+      streamlit run frontend/app.py --server.port=8501 --server.address=0.0.0.0"
+    ports:
+      - "8501:8501"
+    environment:
+      - FOCUSAI_API_URL=http://api:8000
+    volumes:
+      - ./:/app
+    depends_on:
+      - api
