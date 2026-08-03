@@ -1,11 +1,21 @@
-"""Capa de acceso a SQLite: Usuarios y Diarios."""
+"""Capa de acceso a SQLite: Usuarios y Diarios.
+
+Cambios v2 (Alembic + Seed):
+  - init_db() ya NO crea tablas ni índices: Alembic es el responsable del
+    schema. La función solo garantiza que el directorio del archivo exista y
+    devuelve el Path, para que el resto del código (DAG, API, tests) no cambie
+    su firma.
+  - seed_demo_data() inyecta 30 días de historial de demo con entradas
+    productivas y de procrastinación variadas, usando insert_diario().
+"""
 from __future__ import annotations
 
 import hashlib
+import random
 import sqlite3
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -13,11 +23,12 @@ from typing import Any, Iterator
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config.settings import DATABASE_PATH
+from config.settings import DATABASE_PATH  # noqa: E402
 
 
 def _hash_password(password: str, salt: str = "focusai_salt") -> str:
@@ -42,35 +53,25 @@ def get_connection(db_path: Path | str | None = None) -> Iterator[sqlite3.Connec
 
 
 def init_db(db_path: Path | str | None = None) -> Path:
+    """Garantiza que el directorio de la base de datos exista.
+
+    A partir de la versión 2, **Alembic** es el responsable exclusivo de
+    crear y evolucionar el schema (tablas, índices, foreign keys). Esta
+    función se mantiene para que los callers existentes (DAG, API, tests)
+    no rompan su interfaz: devuelve el Path de la DB y asegura que el
+    directorio padre exista.
+
+    Para aplicar migraciones pendientes ejecuta:
+        alembic upgrade head
+    """
     path = Path(db_path) if db_path else DATABASE_PATH
-    with get_connection(path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-
-            CREATE TABLE IF NOT EXISTS diarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario_id INTEGER NOT NULL,
-                texto TEXT NOT NULL,
-                prediccion TEXT,
-                probabilidad REAL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_diarios_usuario
-                ON diarios(usuario_id);
-            CREATE INDEX IF NOT EXISTS idx_diarios_created
-                ON diarios(created_at);
-            """
-        )
+    path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+# ---------------------------------------------------------------------------
+# Usuarios
+# ---------------------------------------------------------------------------
 
 
 def create_user(
@@ -129,6 +130,11 @@ def get_user_by_id(user_id: int, db_path: Path | str | None = None) -> dict[str,
             (user_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Diarios
+# ---------------------------------------------------------------------------
 
 
 def insert_diario(
@@ -202,12 +208,162 @@ def get_procrastination_series(
     return [dict(r) for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# Seed de datos de demostración
+# ---------------------------------------------------------------------------
+
+# Corpus de entradas productivas (variadas en longitud y estilo)
+_TEXTOS_PRODUCTIVOS: list[str] = [
+    "Completé el módulo de feature engineering y todas las pruebas pasaron en verde.",
+    "Revisé el PR de integración con MLflow; dejé comentarios detallados y lo aprobé.",
+    "Redacté la documentación de la API REST: endpoints, ejemplos de request y response.",
+    "Implementé la validación de esquema con Pydantic en los modelos de entrada.",
+    "Refactoricé el pipeline de limpieza de datos; la cobertura de tests subió al 87 %.",
+    "Tuve una sesión de pair programming de 2 h con el equipo para resolver el bug del vectorizador.",
+    "Configuré los alertas de Grafana para monitorear la latencia del modelo en producción.",
+    "Estudié el capítulo de optimización de hiperparámetros con Optuna durante 90 minutos.",
+    "Preparé las slides del demo de MLOps para la reunión con stakeholders del viernes.",
+    "Automaticé el proceso de generación del reporte de métricas con un script de Python.",
+    "Cerré 5 issues del backlog: 3 bugs y 2 mejoras de rendimiento en la API.",
+    "Escribí tests de integración para el flujo de autenticación de usuarios.",
+    "Configuré el entorno de CI/CD en GitHub Actions para el repositorio de FocusAI.",
+    "Analicé los logs de Airflow e identifiqué el cuello de botella en la tarea de extracción.",
+    "Completé el curso de Docker avanzado; practiqué multi-stage builds para la imagen de la API.",
+]
+
+# Corpus de entradas de procrastinación (variadas en tono y detalle)
+_TEXTOS_PROCRASTINACION: list[str] = [
+    "Pasé casi toda la mañana revisando Twitter y Reddit sin avanzar nada concreto.",
+    "Abrí el IDE pero acabé viendo videos de YouTube sobre machine learning durante 3 horas.",
+    "Reorganicé la carpeta de descargas en lugar de terminar el análisis exploratorio pendiente.",
+    "Estuve 2 horas leyendo artículos de Medium sin tomar notas ni aplicar nada.",
+    "Pospuse la revisión del código de producción; «mañana lo hago» fue mi mantra del día.",
+    "Me distraje con notificaciones del móvil cada 10 minutos; no logré entrar en flujo.",
+    "Pasé la tarde ajustando el tema del editor de código en lugar de escribir tests.",
+    "Tuve una reunión que pudo haber sido un email; el resto del día lo perdí recuperando el foco.",
+    "Revisé el correo electrónico más de 20 veces sin responder ninguno de los importantes.",
+    "Empecé a configurar un nuevo plugin de Vim y acabé sin programar nada en 4 horas.",
+    "Jugué videojuegos durante la jornada laboral justificándolo como 'descanso mental'.",
+    "Estuve planeando el sprint en un tablero Notion sin ejecutar ni una sola tarea.",
+    "Busqué referencias de diseño en Dribbble durante horas; el wireframe sigue vacío.",
+    "Pospuse la llamada con el cliente porque 'no me sentía preparado' sin haberlo intentado.",
+    "Pasé la mañana escuchando podcasts de productividad en vez de ser productivo.",
+]
+
+
+def seed_demo_data(
+    usuario_id: int,
+    db_path: Path | str | None = None,
+    days: int = 30,
+    seed: int = 42,
+) -> list[dict[str, Any]]:
+    """Inyecta ``days`` días de historial de demo para el usuario dado.
+
+    Genera entre 1 y 3 entradas por día con predicciones y probabilidades
+    realistas, distribuidas a lo largo de los últimos ``days`` días.
+
+    Parámetros
+    ----------
+    usuario_id:
+        ID del usuario al que pertenecerán las entradas.
+    db_path:
+        Path opcional a la base de datos (usa DATABASE_PATH si es None).
+    days:
+        Número de días hacia atrás para los que se generan entradas (default 30).
+    seed:
+        Semilla del generador aleatorio para resultados reproducibles.
+
+    Devuelve
+    --------
+    Lista de diccionarios con las entradas insertadas.
+    """
+    rng = random.Random(seed)
+    inserted: list[dict[str, Any]] = []
+
+    now = datetime.now(timezone.utc)
+
+    # Probabilidades de que un día dado tenga entradas productivas vs. de procrastinación.
+    # Se alterna para simular semanas con altibajos realistas.
+    for day_offset in range(days, 0, -1):
+        day_dt = now - timedelta(days=day_offset)
+
+        # Entre 1 y 3 entradas por día
+        n_entries = rng.randint(1, 3)
+
+        for entry_idx in range(n_entries):
+            # Distribuir entradas a lo largo del día (hora entre 8 y 21)
+            hour = rng.randint(8, 21)
+            minute = rng.randint(0, 59)
+            entry_dt = day_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            created_at_iso = entry_dt.isoformat()
+
+            # Tendencia: días impares más productivos, pares más de procrastinación
+            # con variación aleatoria para mayor realismo
+            base_productive_prob = 0.65 if day_offset % 2 != 0 else 0.40
+            es_productivo = rng.random() < base_productive_prob
+
+            if es_productivo:
+                texto = rng.choice(_TEXTOS_PRODUCTIVOS)
+                prediccion = "Productivo"
+                # Probabilidad alta con algo de ruido (0.72 – 0.97)
+                probabilidad = round(rng.uniform(0.72, 0.97), 4)
+            else:
+                texto = rng.choice(_TEXTOS_PROCRASTINACION)
+                prediccion = "Procrastinación"
+                # Probabilidad alta con algo de ruido (0.68 – 0.95)
+                probabilidad = round(rng.uniform(0.68, 0.95), 4)
+
+            # Inserción directa para poder controlar el campo created_at
+            # (insert_diario() siempre usa _utcnow_iso(), por lo que usamos
+            # la conexión directamente aquí para simular fechas históricas).
+            path = Path(db_path) if db_path else DATABASE_PATH
+            with get_connection(path) as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO diarios (usuario_id, texto, prediccion, probabilidad, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (usuario_id, texto, prediccion, probabilidad, created_at_iso),
+                )
+                record = {
+                    "id": cur.lastrowid,
+                    "usuario_id": usuario_id,
+                    "texto": texto,
+                    "prediccion": prediccion,
+                    "probabilidad": probabilidad,
+                    "created_at": created_at_iso,
+                }
+                inserted.append(record)
+
+    print(
+        f"[seed_demo_data] {len(inserted)} entradas inyectadas para usuario_id={usuario_id} "
+        f"({days} días de historial)."
+    )
+    return inserted
+
+
+# ---------------------------------------------------------------------------
+# Punto de entrada para pruebas locales
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     db = init_db()
     print(f"Base de datos lista: {db}")
+
     try:
         user = create_user("demo", "demo@focusai.local", "demo123")
-        print("Usuario demo:", user)
+        print("Usuario demo creado:", user)
     except ValueError:
         user = authenticate_user("demo", "demo123")
-        print("Usuario demo existente:", user)
+        print("Usuario demo existente (autenticado):", user)
+
+    if user:
+        print("\nInyectando datos de demostración...")
+        entries = seed_demo_data(usuario_id=user["id"])
+        series = get_procrastination_series(usuario_id=user["id"])
+        print(f"\nSerie de procrastinación ({len(series)} días):")
+        for row in series:
+            print(
+                f"  {row['dia']} | Productivo: {row['productivo']:>2} | "
+                f"Procrastinación: {row['procrastinacion']:>2} | Total: {row['total']}"
+            )

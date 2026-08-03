@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export AIRFLOW_HOME="${AIRFLOW_HOME:-$ROOT/.airflow}"
 export AIRFLOW__CORE__DAGS_FOLDER="$ROOT/airflow/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
-export AIRFLOW__CORE__EXECUTOR=LocalExecutor
+export AIRFLOW__CORE__EXECUTOR=SequentialExecutor
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://127.0.0.1:5000}"
 
@@ -24,9 +24,9 @@ if [[ ! -f "$AIRFLOW_HOME/airflow.db" ]]; then
     --email admin@focusai.local || true
 fi
 
-echo "Airflow UI -> http://127.0.0.1:8080 (admin/admin)"
+echo "Airflow UI -> http://127.0.0.1:8090 (admin/admin)"
 echo "DAG: focusai_productivity_pipeline"
-airflow webserver --port 8080 &
+airflow webserver --port 8090 &
 WEB_PID=$!
 airflow scheduler &
 SCHED_PID=$!

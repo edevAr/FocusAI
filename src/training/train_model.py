@@ -1,5 +1,16 @@
-"""Entrenamiento Ensemble (PyCaret preferido, sklearn fallback) + MLflow."""
 from __future__ import annotations
+"""Entrenamiento Ensemble (PyCaret preferido, sklearn fallback) + MLflow."""
+# ---------------------------------------------------------------------------
+# Limitar hilos de librerías matemáticas ANTES de cualquier import numérico.
+# Evita que OpenBLAS/MKL/OpenMP lancen workers paralelos que bloquean Windows.
+# ---------------------------------------------------------------------------
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
+# ---------------------------------------------------------------------------
 
 import json
 import os
@@ -38,25 +49,22 @@ warnings.filterwarnings("ignore")
 
 
 def _configure_mlflow(tracking_uri: str | None = None) -> str:
-    uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", MLFLOW_TRACKING_URI)
-    local_uri = f"file://{(PROJECT_ROOT / 'artifacts' / 'mlruns').resolve()}"
-
-    def _use(uri_to_use: str) -> str:
-        mlflow.set_tracking_uri(uri_to_use)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-        return uri_to_use
-
-    if uri.startswith("file:"):
-        return _use(uri)
-
-    try:
-        from mlflow.tracking import MlflowClient
-
-        mlflow.set_tracking_uri(uri)
-        MlflowClient(uri).search_experiments(max_results=1)
-        return _use(uri)
-    except Exception:
-        return _use(local_uri)
+    # Forzar tracking local absoluto con SQLite — sin servidor web, sin file_store.
+    # IMPORTANTE: La DB debe vivir en filesystem nativo Linux (/home/),
+    # NO en /mnt/c/ donde SQLite WAL causa "disk I/O error".
+    import platform
+    if platform.system() != "Windows" and os.path.exists("/home/gabo"):
+        # WSL: usar filesystem nativo Linux
+        db_path = "/home/gabo/mlflow_tracking.db"
+    else:
+        # Windows nativo: usar ruta del proyecto
+        db_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '../../mlflow_tracking.db')
+        )
+    sqlite_uri = f"sqlite:///{db_path}"
+    mlflow.set_tracking_uri(sqlite_uri)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+    return sqlite_uri
 
 
 def _pycaret_include() -> list[str]:
@@ -197,6 +205,7 @@ def _train_with_sklearn(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]
 def _train_with_pycaret(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]:
     from pycaret.classification import (
         compare_models,
+        create_model,
         finalize_model,
         pull,
         save_model,
@@ -206,20 +215,10 @@ def _train_with_pycaret(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]
     setup(
         data=data,
         target="etiqueta",
-        session_id=RANDOM_STATE,
-        fold=CV_FOLDS,
-        normalize=True,
-        log_experiment=False,
-        verbose=False,
-        html=False,
-        n_jobs=-1,
+        n_jobs=1,           # sin paralelismo: evita bloqueo en Windows
+        log_experiment=False,  # sin conexión a MLflow desde PyCaret
     )
-    best_model = compare_models(
-        include=_pycaret_include(),
-        sort="F1",
-        n_select=1,
-        verbose=False,
-    )
+    best_model = create_model('lr', cross_validation=False)
     comparison = pull()
     finalized = finalize_model(best_model)
     save_model(finalized, str(MODEL_PATH))

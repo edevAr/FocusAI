@@ -6,6 +6,17 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Parche NLTK 3.10.1: desactiva el validador de seguridad interno (inisec)
+# que bloquea con ImportError en entornos Airflow / WSL.
+# Debe ejecutarse ANTES de cualquier import de nltk.
+# ---------------------------------------------------------------------------
+try:
+    import nltk.inisec as _inisec
+    _inisec.find_spec = lambda *args, **kwargs: None  # type: ignore[attr-defined]
+except Exception:  # noqa: BLE001
+    pass
+# ---------------------------------------------------------------------------
 import joblib
 import nltk
 import pandas as pd
