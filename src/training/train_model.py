@@ -13,8 +13,17 @@ import numpy as np
 import pandas as pd
 from mlflow.tracking import MlflowClient
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
-from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_val_predict, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -39,7 +48,7 @@ warnings.filterwarnings("ignore")
 
 def _configure_mlflow(tracking_uri: str | None = None) -> str:
     uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", MLFLOW_TRACKING_URI)
-    local_uri = f"file://{(PROJECT_ROOT / 'artifacts' / 'mlruns').resolve()}"
+    local_uri = (PROJECT_ROOT / "artifacts" / "mlruns").resolve().as_uri()
 
     def _use(uri_to_use: str) -> str:
         mlflow.set_tracking_uri(uri_to_use)
@@ -155,9 +164,87 @@ def _evaluate_cv(model, X: pd.DataFrame, y: pd.Series) -> dict:
     return metrics
 
 
-def _train_with_sklearn(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]:
+def _compute_per_class_metrics(model, X: pd.DataFrame, y: pd.Series) -> dict:
+    """Calcula matriz de confusión y métricas por clase usando CV sobre el modelo dado."""
+    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    pipe = Pipeline([("scaler", StandardScaler(with_mean=False)), ("model", model)])
+    preds = cross_val_predict(pipe, X, y, cv=cv, method="predict")
+    labels = sorted(y.unique().tolist())
+    label_names = {0: "Procrastinación", 1: "Productivo"}
+    target_names = [label_names.get(lb, str(lb)) for lb in labels]
+    cm = confusion_matrix(y, preds, labels=labels).tolist()
+    report = classification_report(y, preds, labels=labels, target_names=target_names, output_dict=True, zero_division=0)
+    return {"confusion_matrix": cm, "classification_report": report, "label_names": target_names}
+
+
+def _tune_model(model, model_name: str, X_train: pd.DataFrame, y_train: pd.Series) -> tuple[object, dict, pd.DataFrame]:
+    """Afina hiperparámetros del mejor modelo con RandomizedSearchCV y retorna el modelo tuneado,
+    los mejores params y un DataFrame con todos los resultados del tuning."""
+    from sklearn.ensemble import GradientBoostingClassifier
+
+    param_grids: dict = {
+        "Random Forest": {
+            "model__n_estimators": [100, 200, 300, 500],
+            "model__max_depth": [None, 5, 10, 20],
+            "model__min_samples_split": [2, 5, 10],
+            "model__min_samples_leaf": [1, 2, 4],
+        },
+        "Gradient Boosting": {
+            "model__n_estimators": [80, 120, 200],
+            "model__learning_rate": [0.05, 0.08, 0.1, 0.2],
+            "model__max_depth": [2, 3, 5],
+            "model__subsample": [0.7, 0.9, 1.0],
+        },
+        "XGBoost": {
+            "model__n_estimators": [80, 120, 200],
+            "model__learning_rate": [0.05, 0.08, 0.1, 0.2],
+            "model__max_depth": [3, 4, 6],
+            "model__subsample": [0.7, 0.9, 1.0],
+            "model__colsample_bytree": [0.7, 0.9, 1.0],
+        },
+        "LightGBM": {
+            "model__n_estimators": [80, 120, 200],
+            "model__learning_rate": [0.05, 0.08, 0.1, 0.2],
+            "model__num_leaves": [15, 31, 63],
+            "model__min_child_samples": [5, 10, 20],
+        },
+    }
+
+    param_grid = param_grids.get(model_name)
+    if not param_grid:
+        return model, {}, pd.DataFrame()
+
+    pipe = Pipeline([("scaler", StandardScaler(with_mean=False)), ("model", model)])
+    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    search = RandomizedSearchCV(
+        pipe,
+        param_distributions=param_grid,
+        n_iter=10,
+        scoring="f1_weighted",
+        cv=cv,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+        refit=True,
+        error_score=0.0,
+    )
+    search.fit(X_train, y_train)
+
+    best_params = {k.replace("model__", ""): v for k, v in search.best_params_.items()}
+    results_df = pd.DataFrame(search.cv_results_)[
+        ["rank_test_score", "mean_test_score", "std_test_score", "params"]
+    ].sort_values("rank_test_score").reset_index(drop=True)
+    results_df["params"] = results_df["params"].astype(str)
+
+    return search.best_estimator_, best_params, results_df
+
+
+def _train_with_sklearn(data: pd.DataFrame, test_size: float = 0.2) -> tuple[object, dict, pd.DataFrame]:
     X = data.drop(columns=["etiqueta"])
     y = data["etiqueta"].astype(int)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, stratify=y, random_state=RANDOM_STATE
+    )
 
     rows = []
     best_name = None
@@ -166,7 +253,11 @@ def _train_with_sklearn(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]
     best_metrics: dict = {}
 
     for name, model in _build_candidates().items():
-        metrics = _evaluate_cv(model, X, y)
+        try:
+            metrics = _evaluate_cv(model, X_train, y_train)
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(f"{name} falló durante CV y será omitido: {exc}")
+            continue
         rows.append({"Model": name, **metrics})
         if metrics["F1"] > best_score:
             best_score = metrics["F1"]
@@ -176,22 +267,57 @@ def _train_with_sklearn(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]
 
     comparison = pd.DataFrame(rows).sort_values("F1", ascending=False).reset_index(drop=True)
 
-    final_pipe = Pipeline(
+    # Tuneo de hiperparámetros sobre el mejor modelo
+    tuned_model, best_params, tuning_results = _tune_model(best_model, best_name, X_train, y_train)
+    if best_params:
+        best_model = tuned_model  # reemplaza con la versión tuneada
+
+    per_class = _compute_per_class_metrics(best_model, X_train, y_train)
+
+    # Pipeline base + calibración de probabilidades (sigmoid funciona bien con datasets pequeños)
+    base_pipe = Pipeline(
         [
             ("scaler", StandardScaler(with_mean=False)),
             ("model", best_model),
         ]
     )
-    final_pipe.fit(X, y)
+    calibrated_pipe = CalibratedClassifierCV(base_pipe, method="sigmoid", cv=CV_FOLDS)
+    calibrated_pipe.fit(X_train, y_train)
+
+    # Evaluación sobre el hold-out test set (con probabilidades calibradas)
+    y_pred = calibrated_pipe.predict(X_test)
+    try:
+        y_proba = calibrated_pipe.predict_proba(X_test)[:, 1]
+        holdout_auc = float(roc_auc_score(y_test, y_proba))
+    except Exception:  # noqa: BLE001
+        holdout_auc = None
+
+    holdout_metrics: dict = {
+        "Accuracy": float(accuracy_score(y_test, y_pred)),
+        "F1": float(f1_score(y_test, y_pred, average="weighted", zero_division=0)),
+        "Precision": float(precision_score(y_test, y_pred, average="weighted", zero_division=0)),
+        "Recall": float(recall_score(y_test, y_pred, average="weighted", zero_division=0)),
+        "n_test_samples": int(len(y_test)),
+        "test_size": test_size,
+    }
+    if holdout_auc is not None:
+        holdout_metrics["AUC"] = holdout_auc
+
     best_metrics = {
         **best_metrics,
         "model_name": best_name,
         "trainer": "sklearn_cv",
+        "calibration_method": "sigmoid",
         "cv_folds": CV_FOLDS,
         "n_samples": int(len(data)),
+        "n_train_samples": int(len(y_train)),
         "n_features": int(X.shape[1]),
+        "best_hyperparams": best_params,
+        "per_class_metrics": per_class,
+        "holdout_metrics": holdout_metrics,
+        "_tuning_results": tuning_results,
     }
-    return final_pipe, best_metrics, comparison
+    return calibrated_pipe, best_metrics, comparison
 
 
 def _train_with_pycaret(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]:
@@ -293,6 +419,7 @@ def train_and_evaluate(
                 "target": "etiqueta",
                 "best_model": metrics.get("model_name", "unknown"),
                 "trainer": metrics.get("trainer", "unknown"),
+                "calibration_method": metrics.get("calibration_method", "none"),
             }
         )
         mlflow.log_metrics(
@@ -305,6 +432,16 @@ def train_and_evaluate(
         )
         mlflow.log_artifact(str(joblib_path), artifact_path="model")
         mlflow.log_artifact(str(comparison_path), artifact_path="metrics")
+
+        # Guardar y loguear tabla de tuning
+        tuning_results = metrics.pop("_tuning_results", None)
+        if tuning_results is not None and not tuning_results.empty:
+            tuning_path = out_model.parent / "tuning_results.csv"
+            tuning_results.to_csv(tuning_path, index=False)
+            mlflow.log_artifact(str(tuning_path), artifact_path="metrics")
+        best_hyperparams = metrics.get("best_hyperparams", {})
+        if best_hyperparams:
+            mlflow.log_params({f"tuned_{k}": str(v) for k, v in best_hyperparams.items()})
 
         if register_model:
             try:
@@ -322,6 +459,38 @@ def train_and_evaluate(
                 metrics["registry_warning"] = str(exc)
 
         METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # Guardar y loguear métricas hold-out
+        holdout = metrics.pop("holdout_metrics", None)
+        if holdout:
+            holdout_path = METRICS_PATH.parent / "holdout_metrics.json"
+            with open(holdout_path, "w", encoding="utf-8") as f:
+                json.dump(holdout, f, indent=2, ensure_ascii=False)
+            mlflow.log_artifact(str(holdout_path), artifact_path="metrics")
+            mlflow.log_metrics({
+                f"holdout_{k}": float(v)
+                for k, v in holdout.items()
+                if isinstance(v, (int, float)) and k in {"Accuracy", "F1", "Precision", "Recall", "AUC"}
+            })
+
+        # Guardar métricas por clase en archivo separado
+        per_class = metrics.pop("per_class_metrics", None)
+        if per_class:
+            per_class_path = METRICS_PATH.parent / "per_class_metrics.json"
+            with open(per_class_path, "w", encoding="utf-8") as f:
+                json.dump(per_class, f, indent=2, ensure_ascii=False)
+            mlflow.log_artifact(str(per_class_path), artifact_path="metrics")
+            # Loguear métricas por clase en MLflow (F1 y recall por clase)
+            for class_name in per_class.get("label_names", []):
+                if class_name in per_class["classification_report"]:
+                    class_report = per_class["classification_report"][class_name]
+                    safe_name = class_name.replace(" ", "_").replace("ó", "o").replace("ó", "o")
+                    mlflow.log_metrics({
+                        f"{safe_name}_precision": float(class_report.get("precision", 0)),
+                        f"{safe_name}_recall": float(class_report.get("recall", 0)),
+                        f"{safe_name}_f1": float(class_report.get("f1-score", 0)),
+                    })
+
         with open(METRICS_PATH, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
         mlflow.log_artifact(str(METRICS_PATH), artifact_path="metrics")

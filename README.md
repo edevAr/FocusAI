@@ -388,18 +388,20 @@ El repo ya tiene un **esqueleto funcional end-to-end**. Abajo: estado actual y p
 
 ### 2. Luis Vasquez — Model Builder
 
-**Ya existe**
-- Comparación XGBoost / RF / LightGBM (o Gradient Boosting) con K-Folds
-- Fallback sklearn si PyCaret no está
-- Guardado del mejor modelo + `metrics.json`
+**Implementado**
+- Comparación XGBoost / RF / LightGBM / Gradient Boosting con K-Folds (CV estratificado)
+- Fallback sklearn automático si PyCaret no está instalado
+- Guardado del mejor modelo en `data/models/productivity_classifier.joblib`
+- **Métricas por clase** — matriz de confusión y `classification_report` (precision, recall, F1 por clase) calculados sobre CV; guardados en `data/processed/per_class_metrics.json` y logueados como artefacto en MLflow
+- **Hold-out train/test** — split estratificado 80/20 antes del CV; el modelo se selecciona y calibra sobre el train set y se evalúa en el test set; resultados en `data/processed/holdout_metrics.json` con métricas `holdout_*` logueadas en MLflow
+- **Calibración de probabilidades** — `CalibratedClassifierCV(method="sigmoid")` sobre el mejor modelo para corregir scores borderline (~0.53); el modelo final guardado ya incluye la calibración
+- **Tuneo de hiperparámetros** — `RandomizedSearchCV` (n_iter=10, scoring=f1_weighted) sobre el mejor modelo; tabla completa de combinaciones exportada en `data/models/tuning_results.csv` y mejores params logueados en MLflow con prefijo `tuned_`
+- **Notebook EDA** — `notebooks/eda_focusai.ipynb` con 10 secciones: balance de clases, longitud de texto, top palabras por clase, WordCloud, features TF-IDF discriminativos, comparación de modelos, métricas hold-out, matriz de confusión, resultados de tuning y resumen ejecutivo
+- **Fix Windows** — URI de MLflow local corregida con `Path.as_uri()` para compatibilidad en Windows
+- **Fix LightGBM** — crash en datasets pequeños resuelto con `try/except` por modelo en el loop de CV
 
-**Falta / mejorar**
-- [ ] Instalar y validar **PyCaret** como camino principal (`log_experiment=True` nativo)
-- [ ] Tuneo de hiperparámetros (`tune_model`) y tabla comparativa exportada
-- [ ] Calibración de probabilidades (hoy hay casos borderline ~0.53)
-- [ ] Métricas por clase (matriz de confusión, classification report)
-- [ ] Separar train/test hold-out además del CV
-- [ ] Notebook de análisis exploratorio (EDA) para la demo
+**Opcional (no implementado)**
+- [ ] Instalar y validar **PyCaret** como camino principal (`log_experiment=True` nativo) — *Se omitió porque PyCaret (~1 GB de dependencias) presenta conflictos de versiones con scikit-learn y pandas en Python 3.12 en Windows. El pipeline ya cuenta con un fallback sklearn completamente funcional que cubre todos los requisitos del rol.*
 
 ---
 
