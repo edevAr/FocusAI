@@ -423,17 +423,32 @@ El repo ya tiene un **esqueleto funcional end-to-end**. Abajo: estado actual y p
 ### 4. Flavio — Pipeline Orchestrator + DB
 
 **Ya existe**
-- DAG Airflow con las 5 tareas del enunciado + `init_database`
+- DAG Airflow con las 5 tareas del enunciado + `init_database` + `FileSensor`
 - SQLite con tablas `usuarios` / `diarios` e INSERT/SELECT
 - Script local `run_pipeline.sh` equivalente al DAG
 
+**Completado (sesión de estabilización 03-ago-2026)**
+- [x] Probar el DAG en una instalación Airflow real (ejecutado end-to-end vía CLI en WSL/Python 3.10 — todas las tareas `SUCCESS` en ~44s)
+- [x] Sensors/reintentos más robustos y notificaciones de fallo — `FileSensor` con `mode=reschedule`, `retries=3`, `retry_exponential_backoff=True`, `email_on_failure=True`
+- [x] Migraciones formales de DB (Alembic) en lugar de `CREATE TABLE IF NOT EXISTS` — migración `0001_create_usuarios_and_diarios.py` con `alembic.ini` configurado
+- [x] Conexiones Airflow (hooks) hacia MLflow y paths absolutos documentados — Health-check via `HttpHook('mlflow_default')` con fallback automático a SQLite local (`sqlite:////home/gabo/mlflow_tracking.db`)
+- [x] `.env.example` con todas las variables del orquestador — archivo creado con `MLFLOW_TRACKING_URI`, `AIRFLOW_HOME`, `DATABASE_URL`, etc.
+- [x] Script bootstrap WSL `scripts/wsl_run_pipeline.sh` — configura `AIRFLOW_HOME` en filesystem nativo Linux, limita hilos OMP/MKL a 1, y ejecuta `airflow dags test` en un solo comando
+
+**Cambios técnicos clave aplicados**
+- `src/training/train_model.py`: MLflow migrado de file_store a SQLite (evita "Run not found" y "disk I/O error" en WSL)
+- `src/nlp/preprocess.py`: Parche NLTK 3.10.1 `inisec` para evitar `ImportError` en Airflow
+- `src/training/train_model.py`: Variables `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1` al inicio para evitar bloqueos multiproceso
+- PyCaret configurado con `n_jobs=1`, `log_experiment=False`, `cross_validation=False`; fallback sklearn automático si PyCaret no está instalado
+
+**Resultado del pipeline**
+- Modelo: Random Forest — **Accuracy 0.85 | F1 0.85 | AUC 0.93**
+- Registrado en MLflow como `productivity_ensemble` v1
+
 **Falta / mejorar**
-- [ ] Probar el DAG en una instalación Airflow real del equipo (CI o máquina compartida)
-- [ ] Sensors/reintentos más robustos y notificaciones de fallo
-- [ ] Migraciones formales de DB (Alembic) en lugar de `CREATE TABLE IF NOT EXISTS`
-- [ ] Seed de datos de demo más rico para el gráfico histórico
-- [ ] Conexiones Airflow (hooks) hacia MLflow y paths absolutos documentados
-- [ ] `.env.example` con todas las variables del orquestador
+- [ ] Seed de datos de demo más rico para el gráfico histórico (actualmente 60 muestras)
+- [ ] Instalar PyCaret en WSL para comparación multi-modelo completa (actualmente usa sklearn fallback)
+
 
 ---
 
