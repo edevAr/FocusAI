@@ -422,32 +422,70 @@ El repo ya tiene un **esqueleto funcional end-to-end**. Abajo: estado actual y p
 
 ### 4. Flavio — Pipeline Orchestrator + DB
 
-**Ya existe**
-- DAG Airflow con las 5 tareas del enunciado + `init_database` + `FileSensor`
-- SQLite con tablas `usuarios` / `diarios` e INSERT/SELECT
-- Script local `run_pipeline.sh` equivalente al DAG
+**Estado:** ✅ **Completado al 100%**  
+*DAG de Airflow funcional, migraciones Alembic listas, base de datos SQLite persistente en WSL, y CRUD finalizado.*
 
-**Completado (sesión de estabilización 03-ago-2026)**
-- [x] Probar el DAG en una instalación Airflow real (ejecutado end-to-end vía CLI en WSL/Python 3.10 — todas las tareas `SUCCESS` en ~44s)
-- [x] Sensors/reintentos más robustos y notificaciones de fallo — `FileSensor` con `mode=reschedule`, `retries=3`, `retry_exponential_backoff=True`, `email_on_failure=True`
-- [x] Migraciones formales de DB (Alembic) en lugar de `CREATE TABLE IF NOT EXISTS` — migración `0001_create_usuarios_and_diarios.py` con `alembic.ini` configurado
-- [x] Conexiones Airflow (hooks) hacia MLflow y paths absolutos documentados — Health-check via `HttpHook('mlflow_default')` con fallback automático a SQLite local (`sqlite:////home/gabo/mlflow_tracking.db`)
-- [x] `.env.example` con todas las variables del orquestador — archivo creado con `MLFLOW_TRACKING_URI`, `AIRFLOW_HOME`, `DATABASE_URL`, etc.
-- [x] Script bootstrap WSL `scripts/wsl_run_pipeline.sh` — configura `AIRFLOW_HOME` en filesystem nativo Linux, limita hilos OMP/MKL a 1, y ejecuta `airflow dags test` en un solo comando
+**Entregables y Mejoras Implementadas**
+- [x] **DAG de Airflow 100% Funcional**: Probado en WSL/Python 3.10 sin bloqueos, ejecutando todas las tareas (`extract_data`, `clean_data`, `wait_for_cleaned_csv`, `feature_engineering`, `train_model`, `evaluate_model`, `init_database`) con estado `SUCCESS`.
+- [x] **PyCaret + compare_models en Modo Seguro WSL**: Re-integrado `compare_models(fold=5, sort='Accuracy')` operando con `n_jobs=1` y `log_experiment=False` para evitar congelamientos C++ / deadlocks en WSL.
+- [x] **Migraciones Alembic**: Estructura de BD bajo versión `0001_create_usuarios_and_diarios.py` en sustitución de `CREATE TABLE IF NOT EXISTS`.
+- [x] **Persistencia de Tracking MLflow**: Configurado para usar SQLite persistente en `/home/<usuario>/mlflow_tracking.db` evitando los "disk I/O errors" de `/mnt/c/`.
+- [x] **Capa de Abstracción CRUD (`src/database/crud.py`)**: Funciones limpias de INSERT/SELECT para consumo de la UI/API sin requerir SQL crudo.
+- [x] **Variables y Orquestación**: Archivo `.env.example` completo y script ejecutor `scripts/wsl_run_pipeline.sh`.
+- [x] **Seed de Datos Sintéticos**: Inyección de 30 días de historial de demo simulando altibajos reales de productividad/procrastinación.
 
-**Cambios técnicos clave aplicados**
-- `src/training/train_model.py`: MLflow migrado de file_store a SQLite (evita "Run not found" y "disk I/O error" en WSL)
-- `src/nlp/preprocess.py`: Parche NLTK 3.10.1 `inisec` para evitar `ImportError` en Airflow
-- `src/training/train_model.py`: Variables `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1` al inicio para evitar bloqueos multiproceso
-- PyCaret configurado con `n_jobs=1`, `log_experiment=False`, `cross_validation=False`; fallback sklearn automático si PyCaret no está instalado
+---
 
-**Resultado del pipeline**
-- Modelo: Random Forest — **Accuracy 0.85 | F1 0.85 | AUC 0.93**
-- Registrado en MLflow como `productivity_ensemble` v1
+#### 🚀 Guía de Ejecución Rápida (Para el equipo)
 
-**Falta / mejorar**
-- [ ] Seed de datos de demo más rico para el gráfico histórico (actualmente 60 muestras)
-- [ ] Instalar PyCaret en WSL para comparación multi-modelo completa (actualmente usa sklearn fallback)
+Para levantar el entorno y ejecutar el pipeline completo en WSL:
+
+1. **Abrir terminal WSL (Ubuntu)** y situarse en el proyecto:
+   ```bash
+   cd /mnt/c/Users/Gabo/Desktop/FocusAI
+   ```
+2. **Ejecutar el script bootstrap del pipeline**:
+   ```bash
+   bash scripts/wsl_run_pipeline.sh
+   ```
+   *Nota: El script inicializa la BD de Airflow en `/home/<usuario>/airflow-focusai`, configura las variables de 1 solo hilo (`OMP_NUM_THREADS=1`) para evitar bloqueos y ejecuta el DAG completo. MLflow guardará el tracking en `/home/<usuario>/mlflow_tracking.db`.*
+
+---
+
+#### 🔌 Instrucciones para Mireya (Frontend / Deployment)
+
+La base de datos SQLite ya está inicializada con las migraciones de Alembic y dispone de una capa CRUD limpia. Para conectar FastAPI y Streamlit a la base de datos sin escribir SQL crudo, importa las funciones directamente desde `src/database/crud.py`:
+
+```python
+from src.database.crud import (
+    registrar_usuario,
+    obtener_usuario_por_email,
+    guardar_diario,
+    obtener_historial_diarios,
+)
+
+# 1. Registro de Usuario (retorna el ID creado)
+user_id = registrar_usuario(
+    nombre="nombre_usuario", 
+    email="usuario@focusai.com", 
+    password_hash=hash_de_contrasena
+)
+
+# 2. Login / Consulta por Email (retorna dict o None)
+usuario = obtener_usuario_por_email("usuario@focusai.com")
+# Output: {'id': 1, 'username': '...', 'email': '...', 'password_hash': '...', 'created_at': '...'}
+
+# 3. Guardar Entrada de Diario (retorna el ID del diario)
+diario_id = guardar_diario(
+    usuario_id=user_id, 
+    texto="Hoy estuve avanzando en la interfaz gráfica", 
+    etiqueta_predicha="Productivo", 
+    probabilidad=0.95
+)
+
+# 4. Obtener Historial de Diarios (retorna list[dict] ordenados por fecha)
+historial = obtener_historial_diarios(usuario_id=user_id)
+```
 
 
 ---
