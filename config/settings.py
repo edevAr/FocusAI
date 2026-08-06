@@ -15,6 +15,12 @@ VECTORIZED_CSV_PATH = DATA_PROCESSED_DIR / "vectorized_features.csv"
 VECTORIZER_PATH = DATA_MODELS_DIR / "tfidf_vectorizer.joblib"
 MODEL_PATH = DATA_MODELS_DIR / "productivity_classifier"
 METRICS_PATH = DATA_PROCESSED_DIR / "metrics.json"
+HOLDOUT_METRICS_PATH = DATA_PROCESSED_DIR / "holdout_metrics.json"
+PER_CLASS_METRICS_PATH = DATA_PROCESSED_DIR / "per_class_metrics.json"
+TUNING_RESULTS_PATH = DATA_MODELS_DIR / "tuning_results.csv"
+HOLDOUT_TEST_SIZE = 0.2
+TUNING_ITERATIONS = 20
+CALIBRATION_METHOD = "sigmoid"  # "sigmoid" (Platt) o "isotonic" (requiere mas datos)
 
 # Base de datos
 DATABASE_PATH = PROJECT_ROOT / "data" / "database.db"

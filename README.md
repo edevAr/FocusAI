@@ -120,6 +120,8 @@ FocusAI/
 | Docker Desktop | opcional | Para `docker compose` |
 | Homebrew (macOS) | opcional | `brew install libomp` si quieres LightGBM nativo |
 
+> **Nota Windows:** LightGBM produce un `access violation` en Windows con datasets pequeños y se omite automáticamente. El pipeline corre con XGBoost + Random Forest + Gradient Boosting.
+
 Comprueba tu Python:
 
 ```bash
@@ -173,13 +175,21 @@ python -m spacy download es_core_news_sm
 
 ### 4. Variables de entorno (opcional)
 
+**macOS / Linux:**
 ```bash
 export PYTHONPATH="$(pwd)"
-export MLFLOW_TRACKING_URI="http://127.0.0.1:5000"   # si levantas MLflow server
+export MLFLOW_TRACKING_URI="http://127.0.0.1:5000"
 export FOCUSAI_API_URL="http://127.0.0.1:8000"
 ```
 
-Tip: puedes poner `export PYTHONPATH="$(pwd)"` cada vez que abras una terminal nueva dentro del proyecto.
+**Windows (PowerShell):**
+```powershell
+$env:PYTHONPATH = (Get-Location).Path
+$env:MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
+$env:FOCUSAI_API_URL = "http://127.0.0.1:8000"
+```
+
+Tip: ejecuta el bloque de variables cada vez que abras una terminal nueva dentro del proyecto.
 
 ### 5. Verificar que importa
 
@@ -202,8 +212,17 @@ chmod +x scripts/*.sh
 
 Equivalente manual:
 
+**macOS / Linux:**
 ```bash
 export PYTHONPATH="$(pwd)"
+python -m src.nlp.preprocess
+python -m src.database.db
+python -m src.training.train_model
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:PYTHONPATH = (Get-Location).Path
 python -m src.nlp.preprocess
 python -m src.database.db
 python -m src.training.train_model
@@ -215,11 +234,14 @@ python -m src.training.train_model
 |---------|-------------|
 | `data/processed/cleaned_entries.csv` | Textos limpios |
 | `data/processed/vectorized_features.csv` | Matriz TF-IDF + etiqueta |
-| `data/processed/metrics.json` | Accuracy, F1, etc. |
+| `data/processed/metrics.json` | Métricas CV del mejor modelo |
+| `data/processed/holdout_metrics.json` | Métricas sobre el hold-out (test set) |
+| `data/processed/per_class_metrics.json` | Matriz de confusión + classification report |
 | `data/models/tfidf_vectorizer.joblib` | Vectorizer para inferencia |
-| `data/models/productivity_classifier.joblib` | Modelo entrenado |
+| `data/models/productivity_classifier.joblib` | Modelo entrenado y calibrado |
+| `data/models/tuning_results.csv` | Tabla comparativa base vs. tuneado |
 | `data/database.db` | Usuarios y diarios |
-| `artifacts/mlruns/` | Experiments MLflow (modo file) |
+| `mlflow_tracking.db` | Base de datos MLflow local (SQLite) |
 
 > Nota: el trainer intenta **PyCaret** primero. Si no está instalado, usa **sklearn** automáticamente y registra igual en MLflow.
 
@@ -357,10 +379,13 @@ Tras correr el pipeline / `python -m src.database.db`:
 | `python` es 3.14 y pip falla | Usa `python3.12 -m venv .venv` |
 | `No module named pkg_resources` | `pip install 'setuptools<81'` |
 | LightGBM: `libomp.dylib` missing (macOS) | `brew install libomp` o ignóralo (cae a RF/XGBoost/GB) |
-| `Modelo no encontrado` al predecir | Corre `./scripts/run_pipeline.sh` primero |
+| LightGBM: `access violation` en Windows | Comportamiento conocido en Windows con datasets pequeños; se omite automáticamente |
+| `Modelo no encontrado` al predecir | Corre el pipeline primero: `python -m src.nlp.preprocess` y `python -m src.training.train_model` |
 | Streamlit no conecta a la API | Exporta `FOCUSAI_API_URL=http://127.0.0.1:8000` y verifica que uvicorn esté arriba |
-| `ModuleNotFoundError: src...` | `export PYTHONPATH="$(pwd)"` desde la raíz del repo |
-| PyCaret no instalado | Normal: hay fallback sklearn. Instálalo si el enunciado lo exige |
+| `ModuleNotFoundError: src...` | Linux/macOS: `export PYTHONPATH="$(pwd)"` — Windows PowerShell: `$env:PYTHONPATH = (Get-Location).Path` |
+| `export` no reconocido en Windows | Usa PowerShell con `$env:VARIABLE = "valor"` en lugar de `export` |
+| `ImportError: Blocked import of regex` (NLTK) | El venv está dentro del proyecto; el parche en `preprocess.py` lo resuelve automáticamente |
+| PyCaret no instalado | Normal: hay fallback sklearn. Instálalo con `pip install "pycaret>=3.3.0,<3.4.0"` si el enunciado lo exige |
 | Airflow no ve el DAG | Revisa que `AIRFLOW__CORE__DAGS_FOLDER` apunte a `airflow/dags` |
 
 ---
@@ -388,18 +413,35 @@ El repo ya tiene un **esqueleto funcional end-to-end**. Abajo: estado actual y p
 
 ### 2. Luis Vasquez — Model Builder
 
-**Ya existe**
-- Comparación XGBoost / RF / LightGBM (o Gradient Boosting) con K-Folds
-- Fallback sklearn si PyCaret no está
-- Guardado del mejor modelo + `metrics.json`
+**Estado:** ✅ **Completado al 100%**
 
-**Falta / mejorar**
-- [ ] Instalar y validar **PyCaret** como camino principal (`log_experiment=True` nativo)
-- [ ] Tuneo de hiperparámetros (`tune_model`) y tabla comparativa exportada
-- [ ] Calibración de probabilidades (hoy hay casos borderline ~0.53)
-- [ ] Métricas por clase (matriz de confusión, classification report)
-- [ ] Separar train/test hold-out además del CV
-- [ ] Notebook de análisis exploratorio (EDA) para la demo
+**Entregables implementados**
+- [x] **Hold-out train/test (80/20)**: Split estratificado fijo antes de cualquier entrenamiento. CV solo sobre el 80%; hold-out nunca visto durante training ni tuning.
+- [x] **PyCaret como camino principal**: `compare_models(sort='F1', fold=CV_FOLDS)` + `tune_model()` con fallback automático a sklearn si PyCaret no está instalado.
+- [x] **Tuneo de hiperparámetros**: `tune_model()` en PyCaret y `RandomizedSearchCV` en sklearn (20 iteraciones, `f1_weighted`). Tabla exportada a `data/models/tuning_results.csv` y parámetros logeados en MLflow con prefijo `tuned_`.
+- [x] **Calibración de probabilidades**: `CalibratedClassifierCV(method='sigmoid', cv='prefit')` aplicado post-tuning. Platt scaling robusto para datasets pequeños (~48 muestras de entrenamiento).
+- [x] **Métricas por clase**: Matriz de confusión + `classification_report` completo guardados en `data/processed/per_class_metrics.json`. F1/Precision/Recall por clase logeados en MLflow.
+- [x] **Notebook EDA** (`notebooks/eda.ipynb`): Análisis completo — distribución de clases, longitud de texto, frecuencia de palabras, TF-IDF por clase, comparativa CV vs. hold-out, matriz de confusión y distribución de probabilidades calibradas.
+
+**Métricas MLflow por run**
+
+| Prefijo | Métricas |
+|---------|---------|
+| `cv_` | Accuracy, F1, Precision, Recall, AUC (validación cruzada) |
+| `holdout_` | Accuracy, F1, Precision, Recall, AUC (test set fijo) |
+| `f1_prod`, `f1_proc` | F1 por clase (Productivo / Procrastinación) |
+| `tuned_*` | Hiperparámetros del modelo optimizado |
+
+**Artefactos generados**
+
+| Archivo | Descripción |
+|---------|-------------|
+| `data/processed/metrics.json` | Métricas CV del mejor modelo |
+| `data/processed/holdout_metrics.json` | Métricas sobre el hold-out |
+| `data/processed/per_class_metrics.json` | Matriz de confusión + classification report |
+| `data/models/tuning_results.csv` | Tabla comparativa base vs. tuneado |
+| `data/models/productivity_classifier.joblib` | Modelo final calibrado para serving |
+| `notebooks/eda.ipynb` | Notebook EDA para la demo |
 
 ---
 

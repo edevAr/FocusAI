@@ -7,15 +7,17 @@ from functools import lru_cache
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Parche NLTK 3.10.1: desactiva el validador de seguridad interno (inisec)
-# que bloquea con ImportError en entornos Airflow / WSL.
-# Debe ejecutarse ANTES de cualquier import de nltk.
+# Parche NLTK inisec: cuando el venv está DENTRO del proyecto, inisec bloquea
+# todos los paquetes del venv al considerarlos "del CWD". Solución: envolver
+# sys.meta_path con una lista que ignora la inserción de NLTKSafeImportFinder.
 # ---------------------------------------------------------------------------
-try:
-    import nltk.inisec as _inisec
-    _inisec.find_spec = lambda *args, **kwargs: None  # type: ignore[attr-defined]
-except Exception:  # noqa: BLE001
-    pass
+class _MetaPathNoBlocker(list):  # type: ignore[type-arg]
+    def insert(self, index, obj):  # type: ignore[override]
+        if "NLTKSafeImportFinder" in type(obj).__name__:
+            return  # descarta el finder bloqueante sin error
+        super().insert(index, obj)
+
+sys.meta_path = _MetaPathNoBlocker(sys.meta_path)
 # ---------------------------------------------------------------------------
 import joblib
 import nltk

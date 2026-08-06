@@ -24,8 +24,17 @@ import numpy as np
 import pandas as pd
 from mlflow.tracking import MlflowClient
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
-from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_val_predict, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -34,13 +43,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import (
+    CALIBRATION_METHOD,
     CV_FOLDS,
+    HOLDOUT_METRICS_PATH,
+    HOLDOUT_TEST_SIZE,
+    LABEL_PROCRASTINATION,
+    LABEL_PRODUCTIVE,
     METRICS_PATH,
     MLFLOW_EXPERIMENT_NAME,
     MLFLOW_MODEL_NAME,
     MLFLOW_TRACKING_URI,
     MODEL_PATH,
+    PER_CLASS_METRICS_PATH,
     RANDOM_STATE,
+    TUNING_ITERATIONS,
+    TUNING_RESULTS_PATH,
     VECTORIZED_CSV_PATH,
 )
 from src.nlp.preprocess import run_nlp_pipeline
@@ -128,21 +145,83 @@ def _build_candidates() -> dict:
     except Exception as exc:  # noqa: BLE001
         warnings.warn(f"XGBoost no disponible: {exc}")
 
-    try:
-        from lightgbm import LGBMClassifier
+    import platform
+    if platform.system() != "Windows":
+        # LightGBM produce access violation en Windows con datasets pequeños
+        try:
+            from lightgbm import LGBMClassifier
 
-        candidates["LightGBM"] = LGBMClassifier(
-            n_estimators=120,
-            learning_rate=0.08,
-            num_leaves=31,
-            random_state=RANDOM_STATE,
-            verbose=-1,
-            n_jobs=-1,
-        )
-    except Exception as exc:  # noqa: BLE001
-        warnings.warn(f"LightGBM no disponible: {exc}")
+            candidates["LightGBM"] = LGBMClassifier(
+                n_estimators=120,
+                learning_rate=0.08,
+                num_leaves=31,
+                random_state=RANDOM_STATE,
+                verbose=-1,
+                n_jobs=-1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(f"LightGBM no disponible: {exc}")
 
     return candidates
+
+
+def _param_grid(model) -> dict:
+    """Devuelve el espacio de hiperparámetros según el tipo de modelo."""
+    name = type(model).__name__
+    if "RandomForest" in name:
+        return {
+            "model__n_estimators": [100, 200, 300],
+            "model__max_depth": [None, 5, 10, 20],
+            "model__min_samples_split": [2, 5, 10],
+            "model__max_features": ["sqrt", "log2"],
+        }
+    if "GradientBoosting" in name:
+        return {
+            "model__n_estimators": [80, 120, 200],
+            "model__learning_rate": [0.05, 0.08, 0.1, 0.2],
+            "model__max_depth": [2, 3, 4, 5],
+            "model__subsample": [0.7, 0.8, 0.9, 1.0],
+        }
+    if "XGB" in name:
+        return {
+            "model__n_estimators": [80, 120, 200],
+            "model__max_depth": [3, 4, 5, 6],
+            "model__learning_rate": [0.05, 0.08, 0.1, 0.2],
+            "model__subsample": [0.7, 0.8, 0.9],
+            "model__colsample_bytree": [0.7, 0.8, 0.9],
+        }
+    if "LGBM" in name:
+        return {
+            "model__n_estimators": [80, 120, 200],
+            "model__learning_rate": [0.05, 0.08, 0.1, 0.2],
+            "model__num_leaves": [15, 31, 63],
+            "model__min_child_samples": [5, 10, 20],
+        }
+    return {}
+
+
+def _tune_sklearn(
+    pipe: Pipeline, X_train: pd.DataFrame, y_train: pd.Series
+) -> tuple[Pipeline, dict]:
+    """Tuning via RandomizedSearchCV; devuelve el pipeline tuneado y los mejores params."""
+    grid = _param_grid(pipe.named_steps["model"])
+    if not grid:
+        return pipe, {}
+
+    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    search = RandomizedSearchCV(
+        pipe,
+        param_distributions=grid,
+        n_iter=TUNING_ITERATIONS,
+        scoring="f1_weighted",
+        cv=cv,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+        refit=True,
+    )
+    search.fit(X_train, y_train)
+    best_params = {k.replace("model__", ""): v for k, v in search.best_params_.items()}
+    return search.best_estimator_, best_params
 
 
 def _evaluate_cv(model, X: pd.DataFrame, y: pd.Series) -> dict:
@@ -163,10 +242,70 @@ def _evaluate_cv(model, X: pd.DataFrame, y: pd.Series) -> dict:
     return metrics
 
 
-def _train_with_sklearn(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]:
-    X = data.drop(columns=["etiqueta"])
-    y = data["etiqueta"].astype(int)
+def _calibrate(model, X_train: pd.DataFrame, y_train: pd.Series):
+    """Envuelve el modelo ya entrenado con CalibratedClassifierCV (cv='prefit').
 
+    Usa Platt scaling ('sigmoid') por defecto — robusto con datasets pequeños.
+    Isotonic requiere al menos ~1000 muestras para ser confiable.
+    """
+    calibrated = CalibratedClassifierCV(
+        estimator=model,
+        method=CALIBRATION_METHOD,
+        cv="prefit",  # modelo ya entrenado; solo ajusta el calibrador
+    )
+    calibrated.fit(X_train, y_train)
+    return calibrated
+
+
+def _evaluate_holdout(pipe: Pipeline, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
+    """Evalúa el modelo final sobre el conjunto hold-out (nunca visto en entrenamiento)."""
+    preds = pipe.predict(X_test)
+    proba = pipe.predict_proba(X_test)
+    metrics = {
+        "Accuracy": float(accuracy_score(y_test, preds)),
+        "F1": float(f1_score(y_test, preds, average="weighted")),
+        "Precision": float(precision_score(y_test, preds, average="weighted", zero_division=0)),
+        "Recall": float(recall_score(y_test, preds, average="weighted", zero_division=0)),
+        "n_samples_test": int(len(y_test)),
+    }
+    try:
+        metrics["AUC"] = float(roc_auc_score(y_test, proba[:, 1]))
+    except Exception:  # noqa: BLE001
+        pass
+    return metrics
+
+
+def _compute_per_class_metrics(pipe: Pipeline, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
+    """Matriz de confusión + reporte por clase sobre el hold-out."""
+    # Etiquetas legibles: 0 = Procrastinación, 1 = Productivo
+    class_names = [LABEL_PROCRASTINATION, LABEL_PRODUCTIVE]
+
+    preds = pipe.predict(X_test)
+
+    # Matriz de confusión como lista de listas (serializable a JSON)
+    cm = confusion_matrix(y_test, preds, labels=[0, 1])
+    cm_dict = {
+        "labels": class_names,
+        "matrix": cm.tolist(),  # [[TN, FP], [FN, TP]]
+    }
+
+    # Classification report como dict
+    report = classification_report(
+        y_test, preds,
+        target_names=class_names,
+        output_dict=True,
+        zero_division=0,
+    )
+
+    return {
+        "confusion_matrix": cm_dict,
+        "classification_report": report,
+    }
+
+
+def _train_with_sklearn(
+    X_train: pd.DataFrame, y_train: pd.Series, n_total: int
+) -> tuple[object, dict, pd.DataFrame]:
     rows = []
     best_name = None
     best_score = -1.0
@@ -174,7 +313,11 @@ def _train_with_sklearn(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]
     best_metrics: dict = {}
 
     for name, model in _build_candidates().items():
-        metrics = _evaluate_cv(model, X, y)
+        try:
+            metrics = _evaluate_cv(model, X_train, y_train)
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(f"{name} falló durante CV: {exc}")
+            continue
         rows.append({"Model": name, **metrics})
         if metrics["F1"] > best_score:
             best_score = metrics["F1"]
@@ -182,62 +325,106 @@ def _train_with_sklearn(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]
             best_metrics = metrics
             best_model = model
 
+    if best_model is None:
+        raise RuntimeError("Ningún modelo pudo entrenarse. Revisa las dependencias.")
+
     comparison = pd.DataFrame(rows).sort_values("F1", ascending=False).reset_index(drop=True)
 
-    final_pipe = Pipeline(
+    base_pipe = Pipeline(
         [
             ("scaler", StandardScaler(with_mean=False)),
             ("model", best_model),
         ]
     )
-    final_pipe.fit(X, y)
+
+    # Tuning de hiperparámetros sobre el mejor candidato
+    tuned_pipe, tuned_params = _tune_sklearn(base_pipe, X_train, y_train)
+
     best_metrics = {
         **best_metrics,
         "model_name": best_name,
         "trainer": "sklearn_cv",
         "cv_folds": CV_FOLDS,
-        "n_samples": int(len(data)),
-        "n_features": int(X.shape[1]),
+        "n_samples_train": int(len(y_train)),
+        "n_samples_total": n_total,
+        "n_features": int(X_train.shape[1]),
+        "tuned_params": tuned_params,
     }
-    return final_pipe, best_metrics, comparison
+    return tuned_pipe, best_metrics, comparison
 
 
-def _train_with_pycaret(data: pd.DataFrame) -> tuple[object, dict, pd.DataFrame]:
-    from pycaret.classification import (
-        compare_models,
-        create_model,
-        finalize_model,
-        pull,
-        save_model,
-        setup,
-    )
+def _train_with_pycaret(
+    X_train: pd.DataFrame, y_train: pd.Series, n_total: int
+) -> tuple[object, dict, pd.DataFrame]:
+    from pycaret.classification import compare_models, finalize_model, pull, setup, tune_model
+
+    train_data = X_train.copy()
+    train_data["etiqueta"] = y_train.values
 
     setup(
-        data=data,
+        data=train_data,
         target="etiqueta",
-        n_jobs=1,           # sin paralelismo: evita bloqueo en Windows
-        log_experiment=False,  # sin conexión a MLflow desde PyCaret
+        fold=CV_FOLDS,
+        fold_strategy="stratifiedkfold",
+        session_id=RANDOM_STATE,
+        n_jobs=1,           # evita bloqueos OpenMP en Windows/WSL
+        log_experiment=False,  # nosotros controlamos el logging en MLflow
+        verbose=False,
     )
-    best_model = create_model('lr', cross_validation=False)
+
+    include = _pycaret_include()
+    # Agregar GBC (Gradient Boosting) para paridad con el path sklearn
+    if "gbc" not in include:
+        include.append("gbc")
+
+    best = compare_models(
+        fold=CV_FOLDS,
+        sort="F1",
+        include=include,
+        n_select=1,
+        verbose=False,
+    )
     comparison = pull()
-    finalized = finalize_model(best_model)
-    save_model(finalized, str(MODEL_PATH))
+
+    # Tuneo de hiperparámetros sobre el mejor modelo
+    tuned = tune_model(
+        best,
+        optimize="F1",
+        n_iter=TUNING_ITERATIONS,
+        search_library="scikit-learn",
+        search_algorithm="random",
+        fold=CV_FOLDS,
+        verbose=False,
+    )
+    tuning_results = pull()
+
+    # finalize_model re-entrena el modelo tuneado sobre todo X_train (no toca X_test)
+    finalized = finalize_model(tuned)
 
     best_row = comparison.iloc[0]
+    tuned_row = tuning_results.iloc[0] if not tuning_results.empty else best_row
     metrics = {
-        "Accuracy": float(best_row.get("Accuracy", 0.0)),
-        "F1": float(best_row.get("F1", 0.0)),
-        "Precision": float(best_row.get("Prec.", best_row.get("Precision", 0.0))),
-        "Recall": float(best_row.get("Recall", 0.0)) if "Recall" in best_row else None,
-        "AUC": float(best_row.get("AUC", 0.0)) if "AUC" in best_row else None,
-        "model_name": str(best_row.get("Model", type(best_model).__name__)),
+        "Accuracy": float(tuned_row.get("Accuracy", best_row.get("Accuracy", 0.0))),
+        "F1": float(tuned_row.get("F1", best_row.get("F1", 0.0))),
+        "Precision": float(tuned_row.get("Prec.", tuned_row.get("Precision", 0.0))),
+        "Recall": float(tuned_row.get("Recall", 0.0)) if "Recall" in tuned_row else None,
+        "AUC": float(tuned_row.get("AUC", 0.0)) if "AUC" in tuned_row else None,
+        "model_name": str(best_row.get("Model", type(best).__name__)),
         "trainer": "pycaret",
         "cv_folds": CV_FOLDS,
-        "n_samples": int(len(data)),
-        "n_features": int(data.shape[1] - 1),
+        "tuning_iterations": TUNING_ITERATIONS,
+        "n_samples_train": int(len(y_train)),
+        "n_samples_total": n_total,
+        "n_features": int(X_train.shape[1]),
     }
     metrics = {k: v for k, v in metrics.items() if v is not None}
-    return finalized, metrics, comparison
+
+    # Exportar tabla comparativa con resultados de tuning
+    tuning_export = pd.concat(
+        [comparison.assign(stage="compare"), tuning_results.assign(stage="tuned")],
+        ignore_index=True,
+    )
+    return finalized, metrics, tuning_export
 
 
 def train_and_evaluate(
@@ -253,6 +440,16 @@ def train_and_evaluate(
     out_model = Path(model_path) if model_path else MODEL_PATH
     out_model.parent.mkdir(parents=True, exist_ok=True)
 
+    # --- Hold-out split (estratificado, nunca toca el test en entrenamiento) ---
+    X_all = data.drop(columns=["etiqueta"])
+    y_all = data["etiqueta"].astype(int)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_all, y_all,
+        test_size=HOLDOUT_TEST_SIZE,
+        stratify=y_all,
+        random_state=RANDOM_STATE,
+    )
+
     trainer_error = None
     model = None
     metrics: dict = {}
@@ -260,12 +457,22 @@ def train_and_evaluate(
 
     if prefer_pycaret:
         try:
-            model, metrics, comparison = _train_with_pycaret(data)
+            model, metrics, comparison = _train_with_pycaret(X_train, y_train, len(data))
         except Exception as exc:  # noqa: BLE001
             trainer_error = f"PyCaret falló ({exc}); usando sklearn fallback"
-            model, metrics, comparison = _train_with_sklearn(data)
+            model, metrics, comparison = _train_with_sklearn(X_train, y_train, len(data))
     else:
-        model, metrics, comparison = _train_with_sklearn(data)
+        model, metrics, comparison = _train_with_sklearn(X_train, y_train, len(data))
+
+    # --- Calibración de probabilidades ---
+    model = _calibrate(model, X_train, y_train)
+
+    # --- Evaluación en hold-out ---
+    holdout_metrics = _evaluate_holdout(model, X_test, y_test)
+    holdout_metrics["holdout_test_size"] = HOLDOUT_TEST_SIZE
+
+    # --- Métricas por clase ---
+    per_class = _compute_per_class_metrics(model, X_test, y_test)
 
     # Artefacto principal para serving (joblib, sin depender de PyCaret en runtime)
     joblib_path = Path(f"{out_model}.joblib")
@@ -279,6 +486,10 @@ def train_and_evaluate(
     comparison_path = out_model.parent / "model_comparison.csv"
     comparison.to_csv(comparison_path, index=False)
 
+    # Tabla de tuning (separada de la comparativa base)
+    tuning_path = TUNING_RESULTS_PATH
+    comparison.to_csv(tuning_path, index=False)
+
     with mlflow.start_run(run_name="ensemble_compare") as run:
         metrics["mlflow_run_id"] = run.info.run_id
         metrics["mlflow_tracking_uri"] = used_uri
@@ -288,22 +499,41 @@ def train_and_evaluate(
         mlflow.log_params(
             {
                 "cv_folds": CV_FOLDS,
-                "models_compared": "xgboost,rf,lightgbm",
+                "holdout_test_size": HOLDOUT_TEST_SIZE,
+                "tuning_iterations": TUNING_ITERATIONS,
+                "calibration_method": CALIBRATION_METHOD,
+                "models_compared": "xgboost,rf,lightgbm,gbc",
                 "target": "etiqueta",
                 "best_model": metrics.get("model_name", "unknown"),
                 "trainer": metrics.get("trainer", "unknown"),
             }
         )
+        # Logear hiperparámetros del modelo tuneado (path sklearn)
+        tuned_params = metrics.pop("tuned_params", {})
+        if tuned_params:
+            mlflow.log_params({f"tuned_{k}": str(v) for k, v in tuned_params.items()})
+        # Métricas CV (prefijo cv_)
         mlflow.log_metrics(
             {
-                k: float(v)
+                f"cv_{k}": float(v)
                 for k, v in metrics.items()
                 if k in {"Accuracy", "F1", "AUC", "Precision", "Recall"}
                 and isinstance(v, (int, float))
             }
         )
+        # Métricas hold-out (prefijo holdout_)
+        mlflow.log_metrics(
+            {
+                f"holdout_{k}": float(v)
+                for k, v in holdout_metrics.items()
+                if isinstance(v, (int, float))
+                and k in {"Accuracy", "F1", "AUC", "Precision", "Recall"}
+            }
+        )
+
         mlflow.log_artifact(str(joblib_path), artifact_path="model")
         mlflow.log_artifact(str(comparison_path), artifact_path="metrics")
+        mlflow.log_artifact(str(tuning_path), artifact_path="metrics")
 
         if register_model:
             try:
@@ -325,7 +555,27 @@ def train_and_evaluate(
             json.dump(metrics, f, indent=2, ensure_ascii=False)
         mlflow.log_artifact(str(METRICS_PATH), artifact_path="metrics")
 
-    return metrics
+        # Guardar métricas hold-out en archivo separado
+        with open(HOLDOUT_METRICS_PATH, "w", encoding="utf-8") as f:
+            json.dump(holdout_metrics, f, indent=2, ensure_ascii=False)
+        mlflow.log_artifact(str(HOLDOUT_METRICS_PATH), artifact_path="metrics")
+
+        # Guardar métricas por clase
+        with open(PER_CLASS_METRICS_PATH, "w", encoding="utf-8") as f:
+            json.dump(per_class, f, indent=2, ensure_ascii=False)
+        mlflow.log_artifact(str(PER_CLASS_METRICS_PATH), artifact_path="metrics")
+
+        # Logear F1 por clase en MLflow (valores escalares)
+        report = per_class["classification_report"]
+        for label in [LABEL_PROCRASTINATION, LABEL_PRODUCTIVE]:
+            if label in report:
+                mlflow.log_metrics({
+                    f"f1_{label[:4].lower()}": float(report[label]["f1-score"]),
+                    f"precision_{label[:4].lower()}": float(report[label]["precision"]),
+                    f"recall_{label[:4].lower()}": float(report[label]["recall"]),
+                })
+
+    return {**metrics, "holdout": holdout_metrics, "per_class": per_class}
 
 
 def evaluate_model(metrics_path: Path | str | None = None) -> dict:
