@@ -491,18 +491,21 @@ El repo ya tiene un **esqueleto funcional end-to-end**. Abajo: estado actual y p
 
 ### 3. Luis Lanza — MLOps Tracker
 
-**Ya existe**
-- Logging de params/métricas/artefactos en MLflow
-- Registro en Model Registry (`productivity_ensemble`)
-- Script `scripts/start_mlflow.sh` + servicio en docker-compose
+**Estado:** ✅ Completado para la demo Docker/Linux
 
-**Falta / mejorar**
-- [ ] Documentar convención de experiments/runs/stages (`Staging` → `Production`)
-- [ ] UI checklist: cómo promover un modelo en el Registry
-- [ ] Alias de producción y carga desde Registry en la API (hoy carga joblib local)
-- [ ] Comparación lado a lado de runs en la demo
-- [ ] Backend store persistente (SQLite/Postgres) en vez de solo file store
-- [ ] Alertas básicas si Accuracy/F1 bajan de un umbral
+**Entregables implementados**
+- [x] Logging de parámetros, métricas Accuracy/F1, warnings, artefactos e ID de run en MLflow.
+- [x] Model Registry persistente para `productivity_ensemble`.
+- [x] Convención documentada de aliases `staging` → `production`.
+- [x] Checklist read-only y estado de calidad/modelo en FocusAI.
+- [x] Carga de `models:/productivity_ensemble@production` desde la API.
+- [x] Comparación de runs y promoción manual en la UI nativa de MLflow.
+- [x] Backend SQLite persistente mediante volumen Docker.
+- [x] Warnings de quality gate para Accuracy/F1 y elegibilidad visible.
+
+**Decisiones de alcance**
+- La promoción sigue siendo manual y la autoridad es MLflow.
+- No hay alertas externas ni despliegue Postgres; son evoluciones futuras.
 
 ---
 
