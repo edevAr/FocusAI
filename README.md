@@ -291,7 +291,23 @@ UI: http://127.0.0.1:8501
 
 UI: http://127.0.0.1:5000
 
-Si el server no está arriba, el entrenamiento cae a tracking local en `artifacts/mlruns/` (file store).
+### Comparison and manual promotion
+
+The supported demo path uses the Docker MLflow server and its persistent
+`mlflow-data` volume. Train a candidate, compare its runs in the native MLflow
+UI, and assign the lowercase aliases through MLflow itself:
+
+```bash
+docker compose --profile training run --rm pipeline
+# Open http://127.0.0.1:5000, compare the candidate runs, then assign:
+# staging -> the reviewed version; production -> the approved version.
+```
+
+FocusAI reads the `production` alias and quality-gate tags only. It does not
+offer a promotion button, automatically change aliases, or prevent a privileged
+MLflow operator from assigning an ineligible candidate. When that happens, the
+read-only status panel keeps the observed alias, warning, and failed checklist
+visible.
 
 ---
 
@@ -310,13 +326,38 @@ El script configura `AIRFLOW_HOME` en `.airflow/` dentro del repo y apunta `DAGS
 
 ---
 
-## Docker Compose
+## Docker Compose (supported Linux path)
 
-Con el modelo ya entrenado (o montando `data/`):
+Requires Docker Engine with the Compose plugin on Linux. Copy the example
+environment only when you need different thresholds or aliases:
 
 ```bash
+cp .env.example .env
 docker compose up --build
 ```
+
+Compose starts MLflow, runs the Alembic migration, bootstraps demo data, then
+starts the API and Streamlit. A fresh stack can be live while `/health/ready`
+is degraded until a native MLflow `production` alias points to a loadable model.
+Check the read-only state with:
+
+```bash
+curl http://127.0.0.1:8000/health/ready
+curl http://127.0.0.1:8000/mlops/status
+```
+
+Restart without deleting managed data:
+
+```bash
+docker compose down
+docker compose up -d
+```
+
+Do not use `down -v` when preserving the demo history. To roll back a model,
+use the MLflow UI/API to reassign `production` to the previous version; to roll
+back this status slice, revert only its API/frontend/DAG/documentation changes.
+SQLite volumes are appropriate for the demo. A production migration to Postgres
+requires a separate deployment plan and is not provisioned by this project.
 
 | Servicio | URL |
 |----------|-----|
@@ -331,6 +372,9 @@ docker compose up --build
 | Método | Ruta | Descripción |
 |--------|------|-------------|
 | GET | `/health` | Healthcheck |
+| GET | `/health/live` | Proceso activo |
+| GET | `/health/ready` | Schema, MLflow y bundle Production utilizables |
+| GET | `/mlops/status` | Estado read-only: readiness, identidad Production, warnings y checklist |
 | POST | `/predict` | Clasifica texto; `usuario_id` opcional para guardar en DB |
 | POST | `/predict/batch` | Clasifica lista de textos |
 | POST | `/auth/register` | Alta de usuario |

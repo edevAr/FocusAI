@@ -71,6 +71,47 @@ def api_get(path: str) -> tuple[bool, dict | str]:
         return False, str(exc)
 
 
+def status_messages(status: dict) -> dict[str, str | list[str]]:
+    readiness = status.get("readiness", {})
+    state = readiness.get("status", "unknown")
+    causes = ", ".join(readiness.get("causes", {}).values())
+    production = status.get("production")
+    identity = (
+        f"{production['name']}@{production['alias']} (version {production['version']})"
+        if production
+        else "Production alias unavailable"
+    )
+    checklist = status.get("checklist", {})
+    return {
+        "readiness": f"Readiness: {state}" + (f" — {causes}" if causes else ""),
+        "production": identity,
+        "warnings": status.get("quality", {}).get("warnings", []),
+        "checklist": [
+            f"{'✅' if checklist.get('production_alias') else '⚠️'} Production alias observed",
+            f"{'✅' if checklist.get('quality_gates') else '⚠️'} Quality gates passed",
+        ],
+    }
+
+
+def render_mlops_status() -> None:
+    st.subheader("MLOps status")
+    ok, data = api_get("/mlops/status")
+    if not ok or not isinstance(data, dict):
+        st.warning(f"Status unavailable: {data}")
+        return
+    messages = status_messages(data)
+    if data["readiness"].get("status") == "ready":
+        st.success(messages["readiness"])
+    else:
+        st.warning(messages["readiness"])
+    st.caption(f"Production: {messages['production']}")
+    for warning in messages["warnings"]:
+        st.warning(warning)
+    for item in messages["checklist"]:
+        st.write(item)
+    st.caption(data["authority"])
+
+
 def init_session() -> None:
     if "user" not in st.session_state:
         st.session_state.user = None
@@ -123,6 +164,7 @@ def render_dashboard() -> None:
 
     st.title("Diario de productividad")
     st.write("Escribe cómo fue tu día y el modelo Ensemble te clasificará.")
+    render_mlops_status()
 
     col_input, col_result = st.columns([1.2, 1])
 

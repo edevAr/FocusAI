@@ -4,7 +4,7 @@ extract_data -> clean_data -> wait_for_cleaned_csv -> feature_engineering -> tra
 
 Cambios v2 (MLOps hardening):
   - FileSensor: espera la existencia de CLEANED_CSV_PATH antes de feature_engineering.
-  - default_args robustecidos: retries=3, retry_exponential_backoff=True, email_on_failure=True.
+   - El entrenamiento registra evidencia de quality gates; Airflow no promueve aliases.
   - _task_train_model: verifica disponibilidad de MLflow vía HttpHook antes de entrenar;
     si el servidor no responde, imprime advertencia y continúa con la URI de settings.
 """
@@ -99,7 +99,11 @@ def _task_train_model(**_context):
 
     # --- Entrenamiento -------------------------------------------------------
     metrics = train_and_evaluate(register_model=True)
-    return metrics
+    return {
+        **metrics,
+        "mlflow_alias_authority": "native MLflow UI/API",
+        "quality_gate_advisory": not metrics.get("quality_eligible", False),
+    }
 
 
 def _task_evaluate_model(**_context):
@@ -122,10 +126,6 @@ def _task_init_database(**_context):
 default_args = {
     "owner": "focusai",
     "depends_on_past": False,
-    # Notificación por correo en caso de fallo (dirección dummy para demo)
-    "email": ["mlops-alerts@focusai.local"],
-    "email_on_failure": True,
-    "email_on_retry": False,
     # Política de reintentos: 3 intentos con backoff exponencial
     "retries": 3,
     "retry_delay": timedelta(minutes=2),

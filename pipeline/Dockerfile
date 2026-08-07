@@ -8,6 +8,8 @@ COPY requirements-dev.txt /app/requirements-dev.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements-dev.txt
 
 COPY config /app/config
+COPY api /app/api
+COPY frontend /app/frontend
 COPY src /app/src
 COPY scripts /app/scripts
 COPY tests /app/tests

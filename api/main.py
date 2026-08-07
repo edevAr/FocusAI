@@ -10,6 +10,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from mlflow.tracking import MlflowClient
 from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -103,6 +104,70 @@ def health_ready():
     if causes:
         raise HTTPException(status_code=503, detail={"status": "degraded", "causes": causes})
     return {"status": "ready", "service": "focusai-api"}
+
+
+def _quality_status(identity: dict[str, str]) -> dict[str, object]:
+    """Read candidate gate evidence from MLflow; this never changes aliases."""
+    unavailable = {
+        "eligible": False,
+        "accuracy": None,
+        "min_accuracy": None,
+        "f1": None,
+        "min_f1": None,
+        "warnings": ["Quality-gate evidence is unavailable."],
+    }
+    try:
+        version = MlflowClient(MLFLOW_TRACKING_URI).get_model_version(
+            identity["name"], identity["version"]
+        )
+        tags = MlflowClient(MLFLOW_TRACKING_URI).get_run(version.run_id).data.tags
+    except Exception as exc:  # MLflow can be reachable while metadata is unavailable.
+        return {**unavailable, "warnings": [f"Quality-gate evidence is unavailable: {exc}"]}
+
+    def value(key: str) -> float | None:
+        try:
+            return float(tags[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    warnings = tags.get("quality.warnings", "none")
+    return {
+        "eligible": tags.get("quality.eligible") == "true",
+        "accuracy": value("quality.accuracy"),
+        "min_accuracy": value("quality.min_accuracy"),
+        "f1": value("quality.f1"),
+        "min_f1": value("quality.min_f1"),
+        "warnings": [] if warnings == "none" else warnings.split(" | "),
+    }
+
+
+@app.get("/mlops/status")
+def mlops_status():
+    """Expose observed readiness and MLflow evidence without promotion controls."""
+    causes = _readiness_components()
+    production: dict[str, str] | None = None
+    try:
+        production = get_production_model().identity.as_dict()
+    except ProductionModelUnavailableError:
+        pass
+    quality = _quality_status(production) if production else {
+        "eligible": False,
+        "accuracy": None,
+        "min_accuracy": None,
+        "f1": None,
+        "min_f1": None,
+        "warnings": ["Production alias is unavailable; quality gates cannot be evaluated."],
+    }
+    return {
+        "readiness": {"status": "degraded", "causes": causes} if causes else {"status": "ready"},
+        "production": production,
+        "quality": quality,
+        "checklist": {
+            "production_alias": production is not None,
+            "quality_gates": quality["eligible"],
+        },
+        "authority": "Compare runs and assign aliases through native MLflow UI/API; FocusAI is read-only.",
+    }
 
 
 @app.post("/predict")
