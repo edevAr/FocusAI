@@ -25,7 +25,8 @@ from src.database.db import (
     insert_diario,
 )
 from src.training.predict import predict_one, predict_texts
-from config.settings import DATABASE_PATH, MLFLOW_TRACKING_URI, MODEL_PATH, VECTORIZER_PATH
+from src.training.registry import ProductionModelUnavailableError, get_production_model
+from config.settings import DATABASE_PATH, MLFLOW_TRACKING_URI
 
 app = FastAPI(
     title="FocusAI API",
@@ -83,10 +84,10 @@ def _readiness_components() -> dict[str, str]:
     except (URLError, OSError) as exc:
         components["mlflow"] = f"unavailable: {exc.reason if isinstance(exc, URLError) else exc}"
 
-    if not VECTORIZER_PATH.exists() or not any(
-        Path(f"{MODEL_PATH}{suffix}").exists() for suffix in (".joblib", ".pkl")
-    ):
-        components["model"] = "unavailable: local model artifacts have not been trained"
+    try:
+        get_production_model()
+    except ProductionModelUnavailableError as exc:
+        components["model"] = f"unavailable: {exc}"
     return components
 
 
@@ -108,8 +109,10 @@ def health_ready():
 def predict(payload: PredictRequest):
     try:
         result = predict_one(payload.texto)
-    except FileNotFoundError as exc:
+    except ProductionModelUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Error de predicción: {exc}") from exc
 
@@ -130,8 +133,10 @@ def predict(payload: PredictRequest):
 def predict_batch(payload: BatchPredictRequest):
     try:
         return {"predictions": predict_texts(payload.textos)}
-    except FileNotFoundError as exc:
+    except ProductionModelUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/auth/register")
