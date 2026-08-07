@@ -1,4 +1,5 @@
 """Configuración central del proyecto FocusAI."""
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,13 +24,18 @@ TUNING_ITERATIONS = 20
 CALIBRATION_METHOD = "sigmoid"  # "sigmoid" (Platt) o "isotonic" (requiere mas datos)
 
 # Base de datos
-DATABASE_PATH = PROJECT_ROOT / "data" / "database.db"
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH", PROJECT_ROOT / "data" / "database.db"))
 
 # MLflow
-MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 MLFLOW_EXPERIMENT_NAME = "productivity_classifier"
-MLFLOW_MODEL_NAME = "productivity_ensemble"
+MLFLOW_MODEL_NAME = os.getenv("MLFLOW_MODEL_NAME", "productivity_ensemble")
 MLFLOW_BACKEND_STORE = str(ARTIFACTS_DIR / "mlruns")
+MLFLOW_STAGING_ALIAS = os.getenv("MLFLOW_STAGING_ALIAS", "staging")
+MLFLOW_PRODUCTION_ALIAS = os.getenv("MLFLOW_PRODUCTION_ALIAS", "production")
+QUALITY_MIN_ACCURACY = float(os.getenv("QUALITY_MIN_ACCURACY", "0.75"))
+QUALITY_MIN_F1 = float(os.getenv("QUALITY_MIN_F1", "0.75"))
+MODEL_CACHE_TTL_SECONDS = int(os.getenv("MODEL_CACHE_TTL_SECONDS", "60"))
 
 # Etiquetas
 LABEL_PRODUCTIVE = "Productivo"

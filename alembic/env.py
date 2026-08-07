@@ -12,6 +12,7 @@ from config.settings import DATABASE_PATH
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 config.set_main_option("sqlalchemy.url", f"sqlite:///{DATABASE_PATH}")
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

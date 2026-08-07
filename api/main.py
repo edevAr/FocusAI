@@ -1,7 +1,10 @@
 """API FastAPI para servir el clasificador de productividad."""
 from __future__ import annotations
 
+import sqlite3
 import sys
+from urllib.error import URLError
+from urllib.request import urlopen
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +25,7 @@ from src.database.db import (
     insert_diario,
 )
 from src.training.predict import predict_one, predict_texts
+from config.settings import DATABASE_PATH, MLFLOW_TRACKING_URI, MODEL_PATH, VECTORIZER_PATH
 
 app = FastAPI(
     title="FocusAI API",
@@ -63,9 +67,41 @@ def on_startup() -> None:
     init_db()
 
 
+def _readiness_components() -> dict[str, str]:
+    components: dict[str, str] = {}
+    try:
+        with sqlite3.connect(DATABASE_PATH) as connection:
+            connection.execute("SELECT version_num FROM alembic_version").fetchone()
+            connection.execute("SELECT 1 FROM usuarios LIMIT 1").fetchone()
+    except sqlite3.Error as exc:
+        components["schema"] = f"unavailable: {exc}"
+
+    try:
+        with urlopen(f"{MLFLOW_TRACKING_URI.rstrip('/')}/health", timeout=2) as response:
+            if response.status != 200:
+                components["mlflow"] = f"unavailable: HTTP {response.status}"
+    except (URLError, OSError) as exc:
+        components["mlflow"] = f"unavailable: {exc.reason if isinstance(exc, URLError) else exc}"
+
+    if not VECTORIZER_PATH.exists() or not any(
+        Path(f"{MODEL_PATH}{suffix}").exists() for suffix in (".joblib", ".pkl")
+    ):
+        components["model"] = "unavailable: local model artifacts have not been trained"
+    return components
+
+
 @app.get("/health")
-def health():
-    return {"status": "ok", "service": "focusai-api"}
+@app.get("/health/live")
+def health_live():
+    return {"status": "live", "service": "focusai-api"}
+
+
+@app.get("/health/ready")
+def health_ready():
+    causes = _readiness_components()
+    if causes:
+        raise HTTPException(status_code=503, detail={"status": "degraded", "causes": causes})
+    return {"status": "ready", "service": "focusai-api"}
 
 
 @app.post("/predict")

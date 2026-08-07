@@ -32,3 +32,4 @@ logs/
 .vscode/
 *.log
 catboost_info/
+.atl/

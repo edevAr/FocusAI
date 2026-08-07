@@ -1,46 +1,81 @@
 services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.14.1
-    container_name: focusai-mlflow
     command: >
-      mlflow server
-      --host 0.0.0.0
-      --port 5000
-      --backend-store-uri /mlflow/mlruns
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
       --default-artifact-root /mlflow/artifacts
     ports:
       - "5000:5000"
     volumes:
-      - ./artifacts/mlruns:/mlflow/mlruns
-      - ./artifacts/mlflow-artifacts:/mlflow/artifacts
+      - mlflow-data:/mlflow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_PATH: /app/data/database.db
+    volumes:
+      - focusai-data:/app/data
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+  bootstrap:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: ["python", "scripts/bootstrap.py"]
+    environment:
+      DATABASE_PATH: /app/data/database.db
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - focusai-data:/app/data
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   api:
     build:
       context: .
       dockerfile: api/Dockerfile
-    container_name: focusai-api
     ports:
       - "8000:8000"
     environment:
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      DATABASE_PATH: /app/data/database.db
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
-      - ./data:/app/data
-      - ./artifacts:/app/artifacts
+      - focusai-data:/app/data
     depends_on:
-      - mlflow
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   frontend:
-    image: python:3.10-slim
-    container_name: focusai-frontend
-    working_dir: /app
-    command: >
-      bash -c "pip install --no-cache-dir streamlit plotly requests pandas &&
-      streamlit run frontend/app.py --server.port=8501 --server.address=0.0.0.0"
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
     ports:
       - "8501:8501"
     environment:
-      - FOCUSAI_API_URL=http://api:8000
-    volumes:
-      - ./:/app
+      FOCUSAI_API_URL: http://api:8000
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+
+volumes:
+  focusai-data:
+  mlflow-data:
