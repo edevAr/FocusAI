@@ -4,7 +4,8 @@ services:
     command: >
       mlflow server --host 0.0.0.0 --port 5000
       --backend-store-uri sqlite:////mlflow/mlflow.db
-      --default-artifact-root /mlflow/artifacts
+      --serve-artifacts
+      --artifacts-destination /mlflow/artifacts
     ports:
       - "5000:5000"
     volumes:
@@ -43,6 +44,19 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: pipeline/Dockerfile
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      QUALITY_MIN_ACCURACY: ${QUALITY_MIN_ACCURACY:-0.75}
+      QUALITY_MIN_F1: ${QUALITY_MIN_F1:-0.75}
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    profiles: ["training"]
 
   api:
     build:

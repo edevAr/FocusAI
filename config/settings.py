@@ -27,7 +27,7 @@ CALIBRATION_METHOD = "sigmoid"  # "sigmoid" (Platt) o "isotonic" (requiere mas d
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", PROJECT_ROOT / "data" / "database.db"))
 
 # MLflow
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
 MLFLOW_EXPERIMENT_NAME = "productivity_classifier"
 MLFLOW_MODEL_NAME = os.getenv("MLFLOW_MODEL_NAME", "productivity_ensemble")
 MLFLOW_BACKEND_STORE = str(ARTIFACTS_DIR / "mlruns")

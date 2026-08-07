@@ -9,11 +9,9 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
 # ---------------------------------------------------------------------------
 
 import json
-import os
 import sys
 import warnings
 from pathlib import Path
@@ -59,29 +57,24 @@ from config.settings import (
     TUNING_ITERATIONS,
     TUNING_RESULTS_PATH,
     VECTORIZED_CSV_PATH,
+    VECTORIZER_PATH,
+    QUALITY_MIN_ACCURACY,
+    QUALITY_MIN_F1,
 )
+from src.training.model_bundle import TextPredictionModel, model_artifacts
+from src.training.quality import evaluate_quality
 from src.nlp.preprocess import run_nlp_pipeline
 
 warnings.filterwarnings("ignore")
 
 
 def _configure_mlflow(tracking_uri: str | None = None) -> str:
-    # Forzar tracking local absoluto con SQLite — sin servidor web, sin file_store.
-    # IMPORTANTE: La DB debe vivir en filesystem nativo Linux (/home/),
-    # NO en /mnt/c/ donde SQLite WAL causa "disk I/O error".
-    import platform
-    if platform.system() != "Windows" and os.path.exists("/home/gabo"):
-        # WSL: usar filesystem nativo Linux
-        db_path = "/home/gabo/mlflow_tracking.db"
-    else:
-        # Windows nativo: usar ruta del proyecto
-        db_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), '../../mlflow_tracking.db')
-        )
-    sqlite_uri = f"sqlite:///{db_path}"
-    mlflow.set_tracking_uri(sqlite_uri)
+    uri = tracking_uri or MLFLOW_TRACKING_URI
+    if not uri:
+        raise ValueError("MLFLOW_TRACKING_URI must point to the running MLflow server.")
+    mlflow.set_tracking_uri(uri)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-    return sqlite_uri
+    return uri
 
 
 def _pycaret_include() -> list[str]:
@@ -531,24 +524,46 @@ def train_and_evaluate(
             }
         )
 
-        mlflow.log_artifact(str(joblib_path), artifact_path="model")
         mlflow.log_artifact(str(comparison_path), artifact_path="metrics")
         mlflow.log_artifact(str(tuning_path), artifact_path="metrics")
 
         if register_model:
             try:
-                mlflow.sklearn.log_model(
-                    sk_model=model,
-                    artifact_path="sklearn_model",
+                model_info = mlflow.pyfunc.log_model(
+                    artifact_path="text_prediction_bundle",
+                    python_model=TextPredictionModel(),
+                    artifacts=model_artifacts(joblib_path, VECTORIZER_PATH),
+                    code_path=["src"],
                     registered_model_name=MLFLOW_MODEL_NAME,
                 )
-                client = MlflowClient()
-                versions = client.search_model_versions(f"name='{MLFLOW_MODEL_NAME}'")
+                metrics["model_uri"] = model_info.model_uri
+                versions = MlflowClient().search_model_versions(
+                    f"name='{MLFLOW_MODEL_NAME}'"
+                )
                 if versions:
-                    latest = sorted(versions, key=lambda v: int(v.version))[-1]
-                    metrics["registered_version"] = latest.version
+                    metrics["registered_version"] = max(
+                        versions, key=lambda version: int(version.version)
+                    ).version
             except Exception as exc:  # noqa: BLE001
                 metrics["registry_warning"] = str(exc)
+
+        gate = evaluate_quality(holdout_metrics, QUALITY_MIN_ACCURACY, QUALITY_MIN_F1)
+        metrics["quality_eligible"] = gate.eligible
+        metrics["quality_warnings"] = list(gate.warnings)
+        mlflow.set_tags(
+            {
+                **gate.tags(),
+                "candidate.run_id": run.info.run_id,
+                "candidate.model_version": str(metrics.get("registered_version", "unavailable")),
+            }
+        )
+        mlflow.log_metrics(
+            {
+                "quality_min_accuracy": QUALITY_MIN_ACCURACY,
+                "quality_min_f1": QUALITY_MIN_F1,
+                "quality_eligible": float(gate.eligible),
+            }
+        )
 
         METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(METRICS_PATH, "w", encoding="utf-8") as f:
