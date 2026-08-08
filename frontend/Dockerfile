@@ -4,7 +4,8 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
-RUN pip install --upgrade pip && pip install streamlit plotly requests pandas
+RUN pip install --upgrade pip && \
+    pip install streamlit plotly requests pandas "streamlit-authenticator==0.3.2" PyYAML
 
 COPY frontend /app/frontend
 

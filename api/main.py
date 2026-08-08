@@ -8,6 +8,7 @@ from urllib.request import urlopen
 from pathlib import Path
 from typing import Optional
 
+import bcrypt
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from mlflow.tracking import MlflowClient
@@ -24,6 +25,11 @@ from src.database.db import (
     get_procrastination_series,
     init_db,
     insert_diario,
+)
+from src.database.crud import (
+    listar_usuarios,
+    obtener_usuario_por_username,
+    registrar_usuario,
 )
 from src.training.predict import predict_one, predict_texts
 from src.training.registry import ProductionModelUnavailableError, get_production_model
@@ -62,6 +68,15 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class StAuthRegisterRequest(BaseModel):
+    """Registro para el flujo de streamlit-authenticator (hash bcrypt)."""
+
+    username: str = Field(..., min_length=3)
+    email: str = Field(..., min_length=5)
+    name: Optional[str] = Field(None, description="Nombre para mostrar")
+    password: str = Field(..., min_length=4)
 
 
 @app.on_event("startup")
@@ -219,6 +234,50 @@ def login(payload: LoginRequest):
     if not user:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
     return {"message": "Login OK", "user": user}
+
+
+@app.post("/auth/st/register")
+def st_register(payload: StAuthRegisterRequest):
+    """Registra un usuario con hash bcrypt compatible con streamlit-authenticator."""
+    password_hash = bcrypt.hashpw(payload.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    try:
+        user_id = registrar_usuario(
+            nombre=payload.username,
+            email=payload.email,
+            password_hash=password_hash,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"message": "Usuario creado", "id": user_id, "username": payload.username.strip()}
+
+
+@app.get("/auth/st/credentials")
+def st_credentials():
+    """Devuelve credenciales en el formato que consume streamlit-authenticator.
+
+    Solo incluye usuarios con hash bcrypt (prefijo ``$2``) para evitar que la
+    verificación de la librería falle con hashes heredados (SHA-256).
+    """
+    usernames: dict[str, dict[str, str]] = {}
+    for user in listar_usuarios():
+        password_hash = user.get("password_hash") or ""
+        if not password_hash.startswith("$2"):
+            continue
+        usernames[user["username"]] = {
+            "email": user["email"],
+            "name": user["username"],
+            "password": password_hash,
+        }
+    return {"credentials": {"usernames": usernames}}
+
+
+@app.get("/auth/st/user/{username}")
+def st_user(username: str):
+    """Devuelve datos públicos del usuario (id, username, email) por username."""
+    user = obtener_usuario_por_username(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return {"id": user["id"], "username": user["username"], "email": user["email"]}
 
 
 @app.get("/users/{usuario_id}/diarios")

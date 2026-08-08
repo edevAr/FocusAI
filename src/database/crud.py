@@ -129,6 +129,62 @@ def obtener_usuario_por_email(
     return dict(row) if row else None
 
 
+def obtener_usuario_por_username(
+    username: str,
+    db_path: Path | str | None = None,
+) -> dict[str, Any] | None:
+    """Busca un usuario por nombre de usuario (útil para streamlit-authenticator).
+
+    Retorna
+    -------
+    dict | None
+        ``{id, username, email, password_hash, created_at}`` o ``None``.
+    """
+    username = username.strip()
+    if not username:
+        return None
+
+    # Búsqueda insensible a mayúsculas: streamlit-authenticator normaliza el
+    # username a minúsculas al iniciar sesión, así que debemos poder resolverlo
+    # aunque en la BD se haya guardado con otra capitalización.
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, username, email, password_hash, created_at
+            FROM usuarios
+            WHERE LOWER(username) = LOWER(?)
+            """,
+            (username,),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
+def listar_usuarios(
+    db_path: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Lista todos los usuarios registrados.
+
+    Útil para construir el diccionario de credenciales que consume
+    ``streamlit-authenticator`` (usuarios + hash de contraseña + email).
+
+    Retorna
+    -------
+    list[dict]
+        Lista de ``{id, username, email, password_hash, created_at}``.
+    """
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, username, email, password_hash, created_at
+            FROM usuarios
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # CRUD — Diarios
 # ---------------------------------------------------------------------------

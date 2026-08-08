@@ -117,50 +117,104 @@ def init_session() -> None:
         st.session_state.user = None
 
 
-def render_auth() -> None:
-    st.title("FocusAI")
-    st.caption("Clasifica tus entradas de diario: Productivo vs Procrastinación")
+def build_authenticator():
+    """Construye el objeto de streamlit-authenticator con credenciales de la API.
 
-    tab_login, tab_register = st.tabs(["Iniciar sesión", "Registrarse"])
+    La verificación de contraseñas (bcrypt), la sesión y la cookie las gestiona
+    streamlit-authenticator; las credenciales se cargan desde la base de datos
+    a través del endpoint ``/auth/st/credentials``.
+    """
+    import streamlit_authenticator as stauth  # import perezoso (solo en runtime)
 
-    with tab_login:
-        with st.form("login_form"):
-            username = st.text_input("Usuario")
-            password = st.text_input("Contraseña", type="password")
-            submitted = st.form_submit_button("Entrar", use_container_width=True)
-            if submitted:
-                ok, data = api_post("/auth/login", {"username": username, "password": password})
-                if ok:
-                    st.session_state.user = data["user"]
-                    st.success(f"Bienvenido, {data['user']['username']}")
-                    st.rerun()
-                else:
-                    st.error(data)
+    ok, data = api_get("/auth/st/credentials")
+    credentials = {"usernames": {}}
+    if ok and isinstance(data, dict):
+        credentials = data.get("credentials", credentials)
 
-    with tab_register:
+    authenticator = stauth.Authenticate(
+        credentials,
+        "focusai_auth",                                              # cookie_name
+        os.getenv("FOCUSAI_COOKIE_KEY", "focusai_signing_key"),     # firma de la cookie
+        30,                                                          # cookie_expiry_days
+    )
+    return authenticator
+
+
+def _do_login(authenticator) -> None:
+    """Invoca el widget de login soportando distintas versiones de la librería."""
+    try:
+        authenticator.login(location="main")
+    except TypeError:
+        authenticator.login("Iniciar sesión", "main")
+
+
+def _do_logout(authenticator) -> None:
+    try:
+        authenticator.logout("Cerrar sesión", "sidebar")
+    except TypeError:
+        authenticator.logout("Cerrar sesión", location="sidebar")
+
+
+def render_register() -> None:
+    """Formulario de registro que persiste el usuario vía la API (hash bcrypt)."""
+    with st.expander("¿No tienes cuenta? Crea una aquí"):
         with st.form("register_form"):
             username = st.text_input("Usuario nuevo")
             email = st.text_input("Email")
             password = st.text_input("Contraseña nueva", type="password")
+            password2 = st.text_input("Repite la contraseña", type="password")
             submitted = st.form_submit_button("Crear cuenta", use_container_width=True)
             if submitted:
-                ok, data = api_post(
-                    "/auth/register",
-                    {"username": username, "email": email, "password": password},
-                )
-                if ok:
-                    st.success("Cuenta creada. Ahora inicia sesión.")
+                if not username or not email or not password:
+                    st.warning("Completa todos los campos.")
+                elif password != password2:
+                    st.warning("Las contraseñas no coinciden.")
                 else:
-                    st.error(data)
+                    ok, data = api_post(
+                        "/auth/st/register",
+                        {"username": username, "email": email, "password": password},
+                    )
+                    if ok:
+                        st.success("Cuenta creada. Ahora inicia sesión.")
+                    else:
+                        st.error(data)
 
 
-def render_dashboard() -> None:
-    user = st.session_state.user
+def render_auth() -> None:
+    """Mensajes de estado + registro. El widget de login se renderiza en main()."""
+    status = st.session_state.get("authentication_status")
+    if status is False:
+        st.error("Usuario o contraseña incorrectos.")
+    elif status is None:
+        st.caption("Inicia sesión arriba o crea una cuenta nueva.")
+
+    render_register()
+
+
+def resolve_current_user() -> dict | None:
+    """Obtiene el registro del usuario autenticado (id/username/email) desde la API."""
+    username = st.session_state.get("username")
+    if not username:
+        return None
+    cached = st.session_state.get("user")
+    if cached and cached.get("username") == username:
+        return cached
+    ok, data = api_get(f"/auth/st/user/{username}")
+    if ok and isinstance(data, dict):
+        st.session_state.user = data
+        return data
+    return None
+
+
+def render_dashboard(authenticator) -> None:
+    user = resolve_current_user()
     st.sidebar.title("FocusAI")
-    st.sidebar.write(f"Hola, **{user['username']}**")
-    if st.sidebar.button("Cerrar sesión"):
-        st.session_state.user = None
-        st.rerun()
+    if user:
+        st.sidebar.write(f"Hola, **{user['username']}**")
+    _do_logout(authenticator)
+    if not user:
+        st.warning("No se pudo cargar tu perfil desde la API. Vuelve a iniciar sesión.")
+        return
 
     st.title("Diario de productividad")
     st.write("Escribe cómo fue tu día y el modelo Ensemble te clasificará.")
@@ -214,41 +268,85 @@ def render_dashboard() -> None:
     ok, data = api_get(f"/users/{user['id']}/procrastination-series")
     ok_d, diarios = api_get(f"/users/{user['id']}/diarios")
 
-    if ok and isinstance(data, dict) and data.get("series"):
-        df = pd.DataFrame(data["series"])
-        fig = px.area(
-            df,
-            x="dia",
-            y=["procrastinacion", "productivo"],
-            title="Productivo vs Procrastinación",
-            labels={"value": "Entradas", "dia": "Día", "variable": "Clase"},
-            color_discrete_map={
-                "procrastinacion": "#f97316",
-                "productivo": "#22c55e",
-            },
-        )
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            legend_title_text="",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Días registrados", len(df))
-        c2.metric("Total procrastinación", int(df["procrastinacion"].sum()))
-        c3.metric("Total productivos", int(df["productivo"].sum()))
-    else:
+    if not (ok and isinstance(data, dict) and data.get("series")):
         st.info("Aún no hay historial. Clasifica tu primera entrada.")
+        return
+
+    df = pd.DataFrame(data["series"])
+    df["dia"] = pd.to_datetime(df["dia"])
+
+    # --- Filtro por rango de fechas ---
+    min_day = df["dia"].min().date()
+    max_day = df["dia"].max().date()
+    date_range = st.date_input(
+        "Filtrar por rango de fechas",
+        value=(min_day, max_day),
+        min_value=min_day,
+        max_value=max_day,
+    )
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        start, end = date_range
+    else:
+        start, end = min_day, max_day
+
+    mask = (df["dia"].dt.date >= start) & (df["dia"].dt.date <= end)
+    df = df.loc[mask].copy()
+    if df.empty:
+        st.info("No hay entradas en el rango seleccionado.")
+        return
+
+    df_plot = df.copy()
+    df_plot["dia"] = df_plot["dia"].dt.strftime("%Y-%m-%d")
+    fig = px.area(
+        df_plot,
+        x="dia",
+        y=["procrastinacion", "productivo"],
+        title="Productivo vs Procrastinación",
+        labels={"value": "Entradas", "dia": "Día", "variable": "Clase"},
+        color_discrete_map={
+            "procrastinacion": "#f97316",
+            "productivo": "#22c55e",
+        },
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend_title_text="",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Días registrados", len(df))
+    c2.metric("Total procrastinación", int(df["procrastinacion"].sum()))
+    c3.metric("Total productivos", int(df["productivo"].sum()))
+
+    st.download_button(
+        "⬇️ Exportar serie (CSV)",
+        data=df_plot.to_csv(index=False).encode("utf-8"),
+        file_name="serie_procrastinacion.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
     if ok_d and isinstance(diarios, dict) and diarios.get("diarios"):
         st.subheader("Últimas entradas")
         hist = pd.DataFrame(diarios["diarios"])
+        hist["created_at_dt"] = pd.to_datetime(hist["created_at"], errors="coerce")
+        hist = hist[
+            (hist["created_at_dt"].dt.date >= start) & (hist["created_at_dt"].dt.date <= end)
+        ]
         show = hist[["created_at", "prediccion", "probabilidad", "texto"]].sort_values(
             "created_at", ascending=False
         )
         st.dataframe(show, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Exportar entradas (CSV)",
+            data=show.to_csv(index=False).encode("utf-8"),
+            file_name="diarios.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 
 def main() -> None:
@@ -262,10 +360,19 @@ def main() -> None:
             "Levanta FastAPI con `uvicorn api.main:app --reload`."
         )
 
-    if st.session_state.user is None:
-        render_auth()
+    authenticator = build_authenticator()
+
+    if not st.session_state.get("authentication_status"):
+        st.title("FocusAI")
+        st.caption("Clasifica tus entradas de diario: Productivo vs Procrastinación")
+
+    # Hidrata la sesión desde la cookie y renderiza el formulario de login si hace falta.
+    _do_login(authenticator)
+
+    if st.session_state.get("authentication_status"):
+        render_dashboard(authenticator)
     else:
-        render_dashboard()
+        render_auth()
 
 
 if __name__ == "__main__":

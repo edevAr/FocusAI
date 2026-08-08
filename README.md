@@ -588,13 +588,18 @@ historial = obtener_historial_diarios(usuario_id=user_id)
 - docker-compose (API + MLflow + frontend)
 
 **Falta / mejorar**
-- [ ] Usar `streamlit-authenticator` como pide el enunciado (hoy auth es custom vía API/SQLite)
-- [ ] JWT o sesiones firmadas (passwords hoy con hash simple SHA256+salt)
+- [x] Usar `streamlit-authenticator` en el login (sesión + cookie + verificación bcrypt); registro persiste hashes bcrypt vía `/auth/st/register`
+- [x] Mejorar UX del dashboard (filtro por rango de fechas + export CSV de serie y entradas)
+- [x] Tests de contrato API (`/predict`, `/auth/login`, `/auth/st/*`) en `tests/test_api_contract.py`
+- [ ] JWT o sesiones firmadas para la API (endpoints `/auth/*` heredados usan SHA256+salt)
 - [ ] Healthchecks + restart policies más completos en Compose
 - [ ] Cargar modelo desde MLflow Registry en runtime (no solo archivos locales)
-- [ ] Mejorar UX del dashboard (filtros por fecha, export CSV)
-- [ ] Tests de contrato API (`/predict`, `/auth/*`)
 - [ ] Guía corta de demo en vivo (script de 3 minutos)
+
+**Endpoints nuevos para streamlit-authenticator**
+- `POST /auth/st/register` — registra usuario con hash bcrypt (compatible con la librería).
+- `GET /auth/st/credentials` — credenciales para `stauth.Authenticate` (solo hashes bcrypt).
+- `GET /auth/st/user/{username}` — resuelve `id/username/email` tras autenticar.
 
 ---
 
