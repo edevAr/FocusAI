@@ -144,12 +144,15 @@ def obtener_usuario_por_username(
     if not username:
         return None
 
+    # Búsqueda insensible a mayúsculas: streamlit-authenticator normaliza el
+    # username a minúsculas al iniciar sesión, así que debemos poder resolverlo
+    # aunque en la BD se haya guardado con otra capitalización.
     with get_connection(db_path) as conn:
         row = conn.execute(
             """
             SELECT id, username, email, password_hash, created_at
             FROM usuarios
-            WHERE username = ?
+            WHERE LOWER(username) = LOWER(?)
             """,
             (username,),
         ).fetchone()
