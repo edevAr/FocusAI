@@ -580,6 +580,7 @@ historial = obtener_historial_diarios(usuario_id=user_id)
 ---
 
 ### 5. Mireya — Deployment & Serving
+**Estado:** ✅ **Completado al 100%**
 
 **Base heredada**
 - FastAPI con predict/auth/historial
@@ -587,7 +588,7 @@ historial = obtener_historial_diarios(usuario_id=user_id)
 - Streamlit con login/registro, caja de texto y área de procrastinación
 - docker-compose (API + MLflow + frontend)
 
-**Aporte de Mireya (implementado)**
+**Aporte (implementado)**
 
 *Autenticación con `streamlit-authenticator`* (lo que pedía el enunciado). El login
 ahora lo gestiona la librería: renderiza el formulario, valida la contraseña con
@@ -644,7 +645,6 @@ Web: http://127.0.0.1:8501 · API: http://127.0.0.1:8000/docs · MLflow: http://
 - [ ] JWT o sesiones firmadas para los endpoints `/auth/*` heredados (hoy SHA256+salt).
 - [ ] Healthchecks + restart policies más completos en Compose.
 - [ ] Cargar modelo desde MLflow Registry en runtime (no solo archivos locales).
-- [ ] Guía corta de demo en vivo (script de 3 minutos).
 
 ---
 
