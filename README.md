@@ -581,25 +581,70 @@ historial = obtener_historial_diarios(usuario_id=user_id)
 
 ### 5. Mireya — Deployment & Serving
 
-**Ya existe**
+**Base heredada**
 - FastAPI con predict/auth/historial
 - Dockerfile de la API
 - Streamlit con login/registro, caja de texto y área de procrastinación
 - docker-compose (API + MLflow + frontend)
 
-**Falta / mejorar**
-- [x] Usar `streamlit-authenticator` en el login (sesión + cookie + verificación bcrypt); registro persiste hashes bcrypt vía `/auth/st/register`
-- [x] Mejorar UX del dashboard (filtro por rango de fechas + export CSV de serie y entradas)
-- [x] Tests de contrato API (`/predict`, `/auth/login`, `/auth/st/*`) en `tests/test_api_contract.py`
-- [ ] JWT o sesiones firmadas para la API (endpoints `/auth/*` heredados usan SHA256+salt)
-- [ ] Healthchecks + restart policies más completos en Compose
-- [ ] Cargar modelo desde MLflow Registry en runtime (no solo archivos locales)
-- [ ] Guía corta de demo en vivo (script de 3 minutos)
+**Aporte de Mireya (implementado)**
+
+*Autenticación con `streamlit-authenticator`* (lo que pedía el enunciado). El login
+ahora lo gestiona la librería: renderiza el formulario, valida la contraseña con
+**bcrypt** y mantiene la sesión con una **cookie firmada** (persiste al recargar).
+El registro usa un formulario propio que persiste al usuario con hash **bcrypt** en
+SQLite a través de la API. No se modificó el código de la BD de Flavio ni el flujo
+`/auth/*` heredado (que sigue disponible para uso programático).
+
+*UX del dashboard.* Filtro por **rango de fechas** en el Área de Procrastinación y
+botones para **exportar CSV** tanto de la serie histórica como de las entradas.
+
+*Tests de contrato de la API* en `tests/test_api_contract.py` (cubren `/predict`,
+`/auth/login` y los `/auth/st/*`, con el modelo y la BD simulados vía monkeypatch).
 
 **Endpoints nuevos para streamlit-authenticator**
 - `POST /auth/st/register` — registra usuario con hash bcrypt (compatible con la librería).
 - `GET /auth/st/credentials` — credenciales para `stauth.Authenticate` (solo hashes bcrypt).
-- `GET /auth/st/user/{username}` — resuelve `id/username/email` tras autenticar.
+- `GET /auth/st/user/{username}` — resuelve `id/username/email` tras autenticar (búsqueda insensible a mayúsculas, porque la librería normaliza el username a minúsculas).
+
+**Archivos modificados/creados**
+- `frontend/app.py` — login con streamlit-authenticator, sesión por cookie, filtros de fecha y export CSV.
+- `api/main.py` — endpoints `/auth/st/*` (registro con bcrypt, credenciales y lookup).
+- `src/database/crud.py` — helpers `listar_usuarios()` y `obtener_usuario_por_username()` (case-insensitive).
+- `tests/test_api_contract.py` — tests de contrato de la API.
+- `frontend/Dockerfile` — instala `streamlit-authenticator==0.3.2` y `PyYAML`.
+- `api/requirements-api.txt` y `requirements-dev.txt` — añaden `bcrypt`.
+
+**Cómo levantar y probar (Docker)**
+
+```bash
+# 1. Levantar el stack (MLflow + BD + API + frontend)
+docker compose up --build
+
+# 2. Entrenar y registrar el modelo (evita el paso de seed que rompe en este contenedor)
+docker compose --profile training run --rm -e PYTHONPATH=/app pipeline \
+  bash -lc "python -m src.nlp.preprocess && python -m src.training.train_model"
+
+# 3. Asignar el alias 'production' (requerido para servir /predict)
+docker compose exec api python -c "from mlflow.tracking import MlflowClient as M; c=M('http://mlflow:5000'); vs=[x for x in c.search_model_versions() if x.name=='productivity_ensemble']; v=max(vs, key=lambda x:int(x.version)).version; c.set_registered_model_alias('productivity_ensemble','production', v); print('production ->', v)"
+
+# 4. Correr los tests
+docker compose --profile training run --rm -e PYTHONPATH=/app pipeline \
+  bash -lc "pip install -q bcrypt && pytest -q"
+```
+
+Web: http://127.0.0.1:8501 · API: http://127.0.0.1:8000/docs · MLflow: http://127.0.0.1:5000
+
+**Notas / troubleshooting**
+- **Puerto 5000 ocupado** en macOS: desactivar *AirPlay Receiver* (Ajustes → General → AirDrop y Handoff) o remapear el puerto de MLflow en `docker-compose.yml`.
+- El alias `production` es un paso **manual** por diseño (el entrenamiento registra la versión pero no promueve aliases). También se puede asignar desde la UI de MLflow.
+- El endpoint `/auth/st/credentials` solo expone usuarios con hash **bcrypt** (prefijo `$2`); los usuarios heredados con hash SHA-256 (p. ej. `demo`) no entran por streamlit-authenticator.
+
+**Pendiente / mejoras futuras**
+- [ ] JWT o sesiones firmadas para los endpoints `/auth/*` heredados (hoy SHA256+salt).
+- [ ] Healthchecks + restart policies más completos en Compose.
+- [ ] Cargar modelo desde MLflow Registry en runtime (no solo archivos locales).
+- [ ] Guía corta de demo en vivo (script de 3 minutos).
 
 ---
 
