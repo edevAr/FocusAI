@@ -20,6 +20,7 @@ Pipeline MLOps para clasificar entradas de diario como **Productivo** o **Procra
 12. [Credenciales de prueba](#credenciales-de-prueba)
 13. [Troubleshooting](#troubleshooting)
 14. [División del equipo: qué falta / qué mejorar](#división-del-equipo-qué-falta--qué-mejorar)
+15. [Documento de Diseño Técnico](#documento-de-diseño-técnico)
 
 ---
 
@@ -658,6 +659,245 @@ Web: http://127.0.0.1:8501 · API: http://127.0.0.1:8000/docs · MLflow: http://
 - [ ] JWT o sesiones firmadas para los endpoints `/auth/*` heredados (hoy SHA256+salt).
 - [ ] Healthchecks + restart policies más completos en Compose.
 - [ ] Cargar modelo desde MLflow Registry en runtime (no solo archivos locales).
+
+---
+
+## Documento de Diseño Técnico
+
+> **Estado del documento:** Revisado | **Fecha:** Agosto 2026
+
+### Resumen
+
+FocusAI es un sistema MLOps que permite a los usuarios registrar entradas de diario en texto libre y, mediante un modelo de Inteligencia Artificial basado en Ensemble Learning y Procesamiento de Lenguaje Natural (NLP), clasifica automáticamente si el día del usuario fue **"Productivo"** o de **"Procrastinación"**. El objetivo principal es brindar retroalimentación instantánea y visualización histórica sobre los patrones de comportamiento del usuario a través de un panel de control interactivo, automatizando todo el ciclo de vida del aprendizaje automático, desde la ingesta de datos hasta el despliegue del modelo en un entorno productivo.
+
+### Supuestos
+
+- Los textos ingresados por los usuarios estarán redactados principalmente en **idioma español**, lo que requiere un pipeline NLP ajustado a dicho idioma.
+- El despliegue inicial (MVP) se diseñará para operar en entornos locales aislados mediante contenedores (Docker) y subsistemas de Linux (WSL), utilizando **SQLite** como motor de base de datos para simplificar la persistencia.
+- El pipeline tolerará limitaciones del hardware subyacente, desactivando algoritmos conflictivos (como LightGBM en entornos Windows pequeños) de forma automática.
+
+### Alcance y Fases
+
+**Fase 1 (Alcance Actual del Proyecto):**
+- Ingesta, limpieza y balanceo de datos (256 muestras sintéticas).
+- Orquestación automatizada de tareas (extracción, procesamiento, entrenamiento y evaluación) utilizando **Apache Airflow**.
+- Entrenamiento, comparación y calibración de modelos Ensemble (XGBoost, Random Forest, Gradient Boosting) usando **PyCaret**.
+- Registro y versionado de modelos (Tracking) usando **MLflow**.
+- Despliegue de una API REST mediante **FastAPI** para inferencia en tiempo real.
+- Desarrollo de un Frontend interactivo (Login, ingreso de texto y gráficos históricos) usando **Streamlit**.
+
+**Fuera de Alcance:**
+- Migración de la base de datos a sistemas distribuidos como PostgreSQL o MySQL.
+- Despliegue de los artefactos en proveedores de nube pública (AWS SageMaker, Azure ML).
+- Autenticación programática basada en tokens JWT para endpoints externos.
+
+---
+
+### 1. Requerimientos
+
+#### 1.1 Requerimientos Funcionales
+
+- **Clasificación NLP:** El sistema debe procesar texto libre (limpieza, tokenización, lematización con spaCy) y extraer características numéricas utilizando el algoritmo TF-IDF.
+- **Experimentación de ML Automatizada:** El sistema debe comparar automáticamente el rendimiento de múltiples modelos y seleccionar el mejor (basado en métrica F1-Score) sin intervención manual durante el pipeline.
+- **Inferencia en Tiempo Real:** Los usuarios deben poder enviar texto a una API y recibir la clasificación (Productivo/Procrastinación) y su probabilidad calibrada en formato JSON.
+- **Persistencia y UI:** Los usuarios deben poder autenticarse de forma segura, registrar sus textos clasificados y visualizar gráficamente su historial de comportamiento a través de un panel web (Área de Procrastinación).
+
+#### 1.2 Requerimientos No Funcionales
+
+- **Reproducibilidad:** El entorno debe ser altamente reproducible, gestionando dependencias estrictas (Python 3.10–3.12) y empaquetado a través de Docker Compose.
+- **Trazabilidad:** Cada ejecución de entrenamiento debe ser registrada meticulosamente en MLflow, almacenando hiperparámetros, métricas (Accuracy, F1, Recall, Precision, AUC) y los artefactos del modelo ganador.
+- **Eficiencia y Seguridad en WSL:** Las operaciones en base de datos deben utilizar una capa CRUD abstracta con SQLAlchemy/Alembic en lugar de SQL crudo para prevenir inyecciones; las ejecuciones de modelado deben limitar la concurrencia a un solo hilo (`n_jobs=1`) para prevenir deadlocks en WSL.
+
+#### 1.3 Estimación de Capacidad
+
+| Parámetro | Estimación |
+|---|---|
+| Consultas por Segundo (QPS) | < 5 durante uso normal del frontend |
+| Latencia Esperada | < 300 ms por solicitud de la API |
+| Volumen de Almacenamiento | SQLite local sin degradación de rendimiento para el volumen inicial proyectado |
+
+---
+
+### 2. Entidades Principales
+
+| Entidad | Campos |
+|---|---|
+| **Usuarios** | `id`, `username`, `email`, `password_hash` (bcrypt), `created_at` |
+| **Entradas de Diario** | `id`, `usuario_id` (FK), `texto`, `etiqueta_predicha`, `probabilidad`, `created_at` |
+| **Artefactos del Modelo** | `tfidf_vectorizer.joblib`, `productivity_classifier.joblib` — versionados por MLflow |
+
+---
+
+### 3. API del Sistema (FastAPI)
+
+El backend expone una arquitectura RESTful con soporte OpenAPI.
+
+| Método | Ruta | Descripción | Input | Output |
+|---|---|---|---|---|
+| `GET` | `/health/ready` | Valida la disponibilidad del modelo (`production`) en MLflow y el esquema de BD | N/A | `200 OK` / `503` |
+| `POST` | `/predict` | Clasifica un texto individual; si recibe `usuario_id`, almacena la predicción | `{"texto": str}` | `{"prediccion": str, "probabilidad": float}` |
+| `POST` | `/auth/register` | Crea un usuario con contraseña hasheada | `{"username": str, "email": str, "password": str}` | `201 Created` |
+| `POST` | `/auth/login` | Autentica a un usuario programáticamente | `{"username": str, "password": str}` | `200 OK` (Token/Auth) |
+| `GET` | `/users/{id}/procrastination-series` | Obtiene el historial formateado para graficar | Parámetro URL `id` | `List[Dict]` de fechas y resultados |
+
+---
+
+### 4. Flujo de Datos Arquitectónico
+
+La arquitectura bifurca el sistema en dos canales independientes:
+
+#### Canal de Entrenamiento (Orquestado por Airflow)
+
+```
+journal_entries.csv
+        │
+        ▼
+  [extract_data]  ──────────────────────────────┐
+        │                                        │
+        ▼                                  [init_database]
+   [clean_data]                                  │
+   (NLP: stopwords, lematización spaCy)          ▼
+        │                               SQLite + Alembic
+        ▼
+[feature_engineering]
+   (TF-IDF Vectorización)
+        │
+        ▼
+  [train_model]
+   (PyCaret compare_models, 5-Fold CV)
+        │
+        ▼
+ [evaluate_model]
+   (Métricas → MLflow SQLite)
+```
+
+#### Canal de Inferencia y UX
+
+```
+Usuario (Streamlit)
+        │  ingresa texto
+        ▼
+   FastAPI /predict
+        │  carga Pipeline sklearn (Vectorizer + Clasificador)
+        ▼
+   Predicción JSON
+        │
+        ├─── INSERT en SQLite (diarios)
+        │
+        └─── Streamlit renderiza respuesta
+             + actualiza Área de Procrastinación
+```
+
+---
+
+### 5. Diseño del DAG de Airflow
+
+El orquestador automatiza la tubería de ML mediante el DAG `focusai_productivity_pipeline`.
+
+**Topología de las tareas:**
+
+| Tarea | Descripción |
+|---|---|
+| `extract_data` | Ingiere y valida el formato del CSV |
+| `init_database` *(paralela)* | Asegura que la BD SQLite y tablas existan vía migraciones Alembic |
+| `clean_data` | Aplica NLP avanzado: normalización, tokenización, lematización y exporta `data_quality_report.json` |
+| `feature_engineering` | Convierte texto en matriz dispersa mediante TF-IDF |
+| `train_model` | Emplea `compare_models` de PyCaret con 5 K-Folds; loguea hiperparámetros en MLflow (`sqlite:////home/<user>/mlflow_tracking.db`) |
+| `evaluate_model` | Genera reporte final con métricas del dataset de hold-out y finaliza el pipeline |
+
+**Configuración de resiliencia del DAG:**
+
+```python
+default_args = {
+    "retries": 3,
+    "retry_delay": timedelta(minutes=2),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=30),
+    "email_on_failure": True,
+}
+```
+
+---
+
+### 6. Inmersiones Profundas
+
+#### 6.1 Procesamiento NLP y Calidad de Datos
+
+Para garantizar un aprendizaje libre de sesgo, la tubería incluye reportes de calidad que detectan y purgan duplicados. La lematización se impuso con la librería **spaCy** frente a NLTK, ya que la extracción de características con TF-IDF alcanzó resultados de clasificación (**F1-Score: ~0.91**) notablemente superiores a un modelo base, permitiendo al sistema identificar ponderaciones clave en el vocabulario productivo/procrastinador.
+
+#### 6.2 Tracking, Versionado y Alias de MLflow
+
+- **Datasets:** A través de un script, se crean snapshots cifrados en SHA256 dentro de `data/versions/` (actualmente en `v1.1.0`), previniendo corrupción de los datos origen.
+- **MLflow Model Registry:** Los modelos exitosos se envían al repositorio local. El despliegue a la API requiere que el equipo, previa evaluación en la UI de MLflow (puerto 5000), asigne manualmente los alias `staging` (revisión) y `production` (aprobado y servido por FastAPI).
+- **Backend de tracking:** `sqlite:////home/<usuario>/mlflow_tracking.db` — en filesystem nativo Linux para evitar errores de I/O en `/mnt/c/`.
+
+#### 6.3 Seguridad y Persistencia (CRUD)
+
+Se abandonó el uso de SQL crudo y se implementó una abstracción CRUD en `src/database/crud.py`. Todas las contraseñas que transitan a través de los endpoints `/auth/*` son cifradas utilizando **bcrypt**, vital ya que la sesión persistente del usuario se gestiona mediante cookies firmadas gestionadas por `streamlit-authenticator`.
+
+```python
+# Importación para Mireya (Frontend / API)
+from src.database.crud import (
+    registrar_usuario,
+    obtener_usuario_por_email,
+    guardar_diario,
+    obtener_historial_diarios,
+)
+```
+
+#### 6.4 Metodología de Pruebas (Testing)
+
+| Suite | Archivo | Descripción |
+|---|---|---|
+| **Unitarias (NLP)** | `tests/test_nlp.py` | Comprueba funciones de limpieza de texto, detección de calidad y eficacia matemática del vectorizador |
+| **Integración (API Contract)** | `tests/test_api_contract.py` | Valida los códigos HTTP en las rutas de predicción y autenticación, empleando BD y modelos simulados (Monkeypatch) |
+
+---
+
+### 7. Decisiones de Diseño Técnico (TDDs)
+
+#### TDD-1: Estrategia de Vectorización — BoW vs TF-IDF
+
+> **Problema:** Determinar cómo convertir los textos libres del usuario en variables predictivas significativas para los árboles de decisión.
+
+| | Opción 1: Bag of Words (BoW) | Opción 2: TF-IDF *(Elegida)* |
+|---|---|---|
+| **Pros** | Simple de implementar, cálculo rápido | Pondera a la baja palabras ubicuas; da relevancia estadística a palabras clave únicas |
+| **Contras** | No distingue importancia contextual; palabras comunes opacan a las críticas | Genera matrices de características más dispersas |
+
+**Conclusión:** Se eligió TF-IDF. La integración produjo un incremento directo en las métricas de Precision y Recall. La comparativa técnica se exportó a `docs/bow_vs_tfidf.md`.
+
+#### TDD-2: Mitigación de Congelamientos en WSL / PyCaret
+
+> **Problema:** La integración original del orquestador sufría bloqueos abruptos en WSL durante la optimización paralela de PyCaret.
+
+| | Opción 1: Deshabilitar algoritmos pesados | Opción 2: Ejecución Serial en Modo Seguro *(Elegida)* |
+|---|---|---|
+| **Pros** | Reduce carga en memoria | Resuelve deadlocks a nivel C++ de forma definitiva sin sacrificar modelos |
+| **Contras** | Reduce capacidad de comparación entre modelos | La tarea `train_model` toma ligeramente más tiempo |
+
+**Configuración implementada:**
+
+```python
+# src/training/train_model.py — inyectadas ANTES de cualquier import numérico
+os.environ["OMP_NUM_THREADS"]      = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"]      = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"]  = "1"
+
+# PyCaret setup en Modo Seguro WSL
+setup(
+    data=data, target="etiqueta",
+    n_jobs=1,           # PROHIBIDO >1: deadlock C++ en WSL
+    log_experiment=False,  # MLflow se loguea manualmente
+    html=False,
+    verbose=False,
+)
+best_model = compare_models(fold=5, sort="Accuracy", verbose=False)
+```
+
+**Conclusión:** La Opción 2 resolvió los deadlocks. La tubería Airflow es **100% resiliente** y completa su ejecución sin interrumpir la persistencia en `database.db`.
 
 ---
 
