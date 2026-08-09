@@ -26,7 +26,7 @@ Pipeline MLOps para clasificar entradas de diario como **Productivo** o **Procra
 ## Qué hace el proyecto
 
 1. Lee un CSV de textos etiquetados (`Productivo` / `Procrastinación`).
-2. Limpia el texto (tokenización, stopwords, lematización opcional con spaCy).
+2. Limpia el texto (tokenización, stopwords, lematización obligatoria con spaCy `es_core_news_sm`).
 3. Vectoriza con **TF-IDF**.
 4. Entrena y compara modelos ensemble (**XGBoost**, **Random Forest**, **LightGBM** / Gradient Boosting) con validación cruzada.
 5. Registra métricas y el modelo en **MLflow**.
@@ -86,22 +86,25 @@ FocusAI/
 ├── config/
 │   └── settings.py                        # Rutas y constantes
 ├── data/
-│   ├── raw/
-│   │   └── journal_entries.csv            # Dataset de ejemplo
-│   ├── processed/                         # Generado al entrenar
-│   ├── models/                            # vectorizer + modelo
-│   └── database.db                        # SQLite (se genera local)
+│   ├── raw/journal_entries.csv
+│   └── versions/                 # Snapshots versionados (v1.1.0, ...)
+├── docs/
+│   └── bow_vs_tfidf.md           # Comparación BoW vs TF-IDF
 ├── frontend/
 │   └── app.py                             # Streamlit
 ├── scripts/
-│   ├── run_pipeline.sh                    # Pipeline local sin Airflow
+│   ├── generate_dataset.py
+│   ├── snapshot_dataset.py
+│   ├── run_pipeline.sh
 │   ├── start_mlflow.sh
 │   └── start_airflow.sh
 ├── src/
-│   ├── nlp/preprocess.py                  # Limpieza + TF-IDF
-│   ├── training/train_model.py            # PyCaret/sklearn + MLflow
-│   ├── training/predict.py                # Inferencia
-│   └── database/db.py                     # Usuarios / Diarios
+│   ├── nlp/
+│   │   ├── preprocess.py
+│   │   ├── data_quality.py
+│   │   └── vectorizer_comparison.py
+│   ├── training/
+│   └── database/
 ├── docker-compose.yml
 ├── requirements-dev.txt                   # Setup liviano (recomendado)
 ├── requirements.txt                       # Stack completo (Airflow+PyCaret)
@@ -160,17 +163,17 @@ Deberías ver `(.venv)` al inicio de la terminal.
 ```bash
 pip install -U pip
 pip install -r requirements-dev.txt
+# Modelo spaCy en español (obligatorio para lematización):
+python -m spacy download es_core_news_sm
 ```
 
 **Opción B — stack completo del enunciado:**
 
 ```bash
 pip install -r requirements.txt
-# Opcional AutoML:
-pip install "pycaret>=3.3.0,<3.4.0"
-# Opcional lematización spaCy en español:
-pip install spacy
 python -m spacy download es_core_news_sm
+# AutoML opcional:
+pip install "pycaret>=3.3.0,<3.4.0"
 ```
 
 ### 4. Variables de entorno (opcional)
@@ -237,7 +240,11 @@ python -m src.training.train_model
 | `data/processed/metrics.json` | Métricas CV del mejor modelo |
 | `data/processed/holdout_metrics.json` | Métricas sobre el hold-out (test set) |
 | `data/processed/per_class_metrics.json` | Matriz de confusión + classification report |
-| `data/models/tfidf_vectorizer.joblib` | Vectorizer para inferencia |
+| `data/models/tfidf_vectorizer.joblib` | Vectorizer TF-IDF para inferencia |
+| `data/processed/data_quality_report.json` | Reporte de calidad (vacíos/duplicados/balance) |
+| `docs/bow_vs_tfidf.md` | Comparación BoW vs TF-IDF |
+| `data/versions/v1.1.0/` | Snapshot versionado del dataset |
+
 | `data/models/productivity_classifier.joblib` | Modelo entrenado y calibrado |
 | `data/models/tuning_results.csv` | Tabla comparativa base vs. tuneado |
 | `data/database.db` | Usuarios y diarios |
@@ -420,6 +427,7 @@ Tras correr el pipeline / `python -m src.database.db`:
 
 | Problema | Solución |
 |----------|----------|
+| `No module named spacy` / modelo ES | `pip install 'spacy>=3.7.0,<3.8.0' && python -m spacy download es_core_news_sm` |
 | `python` es 3.14 y pip falla | Usa `python3.12 -m venv .venv` |
 | `No module named pkg_resources` | `pip install 'setuptools<81'` |
 | LightGBM: `libomp.dylib` missing (macOS) | `brew install libomp` o ignóralo (cae a RF/XGBoost/GB) |
@@ -440,18 +448,23 @@ El repo ya tiene un **esqueleto funcional end-to-end**. Abajo: estado actual y p
 
 ### 1. Edén — NLP Data Engineer
 
-**Ya existe**
-- Script de limpieza + TF-IDF (`src/nlp/preprocess.py`)
-- Dataset de ejemplo en español (`data/raw/journal_entries.csv`)
-- Persistencia de cleaned CSV, features y vectorizer
+**Estado:** ✅ **Completado al 100%**
 
-**Falta / mejorar**
-- [ ] Ampliar el dataset real (idealmente cientos de ejemplos balanceados; hoy ~60)
-- [ ] Integrar spaCy `es_core_news_sm` de forma obligatoria (hoy es opcional)
-- [ ] Experimentar BoW vs TF-IDF y documentar comparación
-- [ ] Pipeline de calidad de datos: duplicados, textos vacíos, balance de clases
-- [ ] Tests unitarios de `clean_text` / `feature_engineering`
-- [ ] Versionar datasets (DVC o carpeta `data/versions/`)
+**Entregables implementados**
+- [x] **Dataset ampliado y balanceado**: `256` ejemplos (`128` Productivo / `128` Procrastinación) en `data/raw/journal_entries.csv`. Regenerable con `python scripts/generate_dataset.py`.
+- [x] **spaCy obligatorio**: `es_core_news_sm` se carga en `get_spacy_nlp()`; si falta el modelo intenta descargarlo y si no puede falla con error accionable.
+- [x] **BoW vs TF-IDF**: comparación reproducible en `python -m src.nlp.vectorizer_comparison` → `docs/bow_vs_tfidf.md` (ganador: TF-IDF, F1≈0.91).
+- [x] **Calidad de datos**: `src/nlp/data_quality.py` detecta/elimina vacíos y duplicados, mide balance de clases y persiste `data/processed/data_quality_report.json`.
+- [x] **Tests unitarios**: `tests/test_nlp.py` cubre `clean_text`, lematización, calidad y `feature_engineering` (BoW/TF-IDF).
+- [x] **Versionado de datasets**: carpeta `data/versions/` + `scripts/snapshot_dataset.py` (manifest SHA256 + `current.json`). Snapshot actual: `v1.1.0`.
+
+**Archivos clave**
+- `src/nlp/preprocess.py`
+- `src/nlp/data_quality.py`
+- `src/nlp/vectorizer_comparison.py`
+- `data/versions/v1.1.0/`
+- `docs/bow_vs_tfidf.md`
+- `tests/test_nlp.py`
 
 ---
 

@@ -7,6 +7,7 @@ joblib>=1.3.0
 # NLP
 nltk>=3.8.1
 spacy>=3.7.0
+# Modelo ES obligatorio tras instalar: python -m spacy download es_core_news_sm
 
 # AutoML
 pycaret[full]>=3.3.0,<3.4.0

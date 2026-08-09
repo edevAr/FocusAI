@@ -1,0 +1,9 @@
+{
+  "version": "v1.1.0",
+  "created_at": "2026-08-09T14:37:57.177620+00:00",
+  "source": "/Users/edenarielguzmanandia/Projects/FocusAI/data/raw/journal_entries.csv",
+  "path": "data/versions/v1.1.0/journal_entries.csv",
+  "sha256": "7219287f57233e6efdff59a430a8d02bc5e79ffb0f2b12a4d2999e65487950c5",
+  "n_rows": 256,
+  "note": "Dataset ampliado balanceado + pipeline calidad NLP"
+}

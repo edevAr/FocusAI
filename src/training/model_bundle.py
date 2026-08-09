@@ -7,15 +7,19 @@ import joblib
 import pandas as pd
 import mlflow.pyfunc
 
-from src.nlp.preprocess import clean_text
+from src.nlp.preprocess import clean_text, feature_column_names
 
 
 class TextPredictionModel(mlflow.pyfunc.PythonModel):
-    """Package cleaner, TF-IDF vectorizer, and classifier in one MLflow model."""
+    """Package cleaner, vectorizer, and classifier in one MLflow model."""
 
     def load_context(self, context: mlflow.pyfunc.PythonModelContext) -> None:
         self.classifier = joblib.load(context.artifacts["classifier"])
-        self.vectorizer = joblib.load(context.artifacts["vectorizer"])
+        payload = joblib.load(context.artifacts["vectorizer"])
+        if isinstance(payload, dict) and "vectorizer" in payload:
+            self.vectorizer = payload["vectorizer"]
+        else:
+            self.vectorizer = payload
 
     def predict(self, context: mlflow.pyfunc.PythonModelContext, model_input: pd.DataFrame) -> pd.DataFrame:
         if "texto" not in model_input.columns:
@@ -32,7 +36,7 @@ class TextPredictionModel(mlflow.pyfunc.PythonModel):
         matrix = self.vectorizer.transform(cleaned)
         features = pd.DataFrame(
             matrix.toarray(),
-            columns=[f"tfidf_{index}" for index in range(matrix.shape[1])],
+            columns=feature_column_names(matrix.shape[1]),
             index=model_input.index,
         )
         labels = self.classifier.predict(features)

@@ -16,7 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY api/requirements-api.txt /app/requirements-api.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements-api.txt \
-    && python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords'); nltk.download('wordnet'); nltk.download('omw-1.4')"
+    && python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords'); nltk.download('wordnet'); nltk.download('omw-1.4')" \
+    && python -m spacy download es_core_news_sm
 
 COPY config /app/config
 COPY src /app/src
